@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
-    { name = "Veerabadran M", github = "https://github.com/Veerabadran-M" },
+    { name = "Veerabadran M", email = "veerabadranm1@gmail.com" },
 ]
 keywords = ["password-manager", "credentials", "cli", "encryption", "security"]
 classifiers = [

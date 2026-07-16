@@ -1,4 +1,4 @@
-# credential-manager / credmgr — Local-First Encrypted Credential Manager
+# credential-manager / credmgr
 
 `credmgr` is a command-line password manager that stores all of your credentials in a single, envelope-encrypted vault file on your own machine. There is no cloud sync, no server, and no telemetry — the vault never leaves your disk unless you explicitly export it.
 
@@ -148,7 +148,7 @@ Writes are crash-safe: `credmgr` writes to a temporary file, `fsync`s it, copies
 ### Option 1 — Install as a package (recommended)
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/Veerabadran-M/credential-manager.git
 cd credential-manager
 pip install .
 ```
