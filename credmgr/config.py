@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 from dataclasses import dataclass, fields
 from pathlib import Path
 
@@ -105,8 +106,22 @@ class Configuration:
         return self.data_dir / "sequences.txt"
 
     @property
-    def shm_dir(self) -> Path:
-        return Path("/dev/shm")
+    def session_cache_dir(self) -> Path:
+        """Directory used to cache the session DEK.
+
+        Prefers /dev/shm (RAM-backed tmpfs) when available, as on most
+        Linux systems. Falls back to a dedicated subdirectory under the
+        platform temp directory on systems where /dev/shm doesn't exist
+        (e.g. Android/Termux).
+        """
+        shm_path = Path("/dev/shm")
+        if shm_path.is_dir():
+            path = shm_path
+        else:
+            path = Path(tempfile.gettempdir()) / "credmgr"
+            path.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+        return path
     
     @property
     def mutable_parameters(self) -> list:

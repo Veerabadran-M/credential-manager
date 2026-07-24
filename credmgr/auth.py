@@ -1,9 +1,10 @@
 """Master-password authentication and short-lived session caching.
 
 The DEK (not the master password, and not the KEK) is what gets cached in
-RAM-backed /dev/shm for the duration of config.auth_timeout, scoped to the
-current terminal session. This avoids re-running Argon2id on every command
-while still keeping the cached secret out of persistent storage.
+the session cache directory (RAM-backed /dev/shm when available) for the
+duration of config.auth_timeout, scoped to the current terminal session.
+This avoids re-running Argon2id on every command while still keeping the
+cached secret out of persistent storage.
 """
 
 from __future__ import annotations
@@ -19,8 +20,8 @@ from .vault import AuthenticationError, Vault
 def get_session_id() -> int:
     return os.getsid(0)
 
-def shm_paths():
-    key_path = config.shm_dir / f".credmgr_{get_session_id()}"
+def session_cache_paths():
+    key_path = config.session_cache_dir / f".credmgr_{get_session_id()}"
     meta_path = key_path.parent / f"{key_path.name}.meta"
     return key_path, meta_path
 
@@ -59,7 +60,7 @@ def deploy_cache_cleaner(key_file, meta_file, sid, created_time) -> None:
             os._exit(0)
 
 def load_cached_dek():
-    key_path, meta_path = shm_paths()
+    key_path, meta_path = session_cache_paths()
     if not key_path.exists() or not meta_path.exists():
         return None
 
@@ -74,7 +75,10 @@ def load_cached_dek():
     return None
 
 def cache_session(dek: bytes) -> None:
-    key_path, meta_path = shm_paths()
+    key_path, meta_path = session_cache_paths()
+
+    key_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     fd = os.open(key_path, flags, 0o600)
     with os.fdopen(fd, "wb") as f:

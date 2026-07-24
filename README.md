@@ -2,7 +2,7 @@
 
 `credmgr` is a command-line password manager that stores all of your credentials in a single, envelope-encrypted vault file on your own machine. There is no cloud sync, no server, and no telemetry — the vault never leaves your disk unless you explicitly export it.
 
-- **Version:** 2.0.0
+- **Version:** 2.1.0
 - **License:** MIT
 - **Requires:** Python ≥ 3.10
 
@@ -252,7 +252,7 @@ Run `credmgr --help` or `credmgr <command> --help` at any time for full usage an
 
 ## Session Caching (Auth Timeout)
 
-Typing your master password (and paying the Argon2 cost) on every single command would be tedious. To avoid this without persisting the master password or DEK to disk, `credmgr` caches the **DEK only** (never the master password, never the KEK) in **`/dev/shm`** — Linux's RAM-backed tmpfs — for up to `auth_timeout` seconds (default: 300s / 5 minutes).
+Typing your master password (and paying the Argon2 cost) on every single command would be tedious. To avoid this without persisting the master password or DEK to disk, `credmgr` caches the **DEK only** (never the master password, never the KEK) in a **session cache directory** for up to `auth_timeout` seconds (default: 300s / 5 minutes). This is **`/dev/shm`** — Linux's RAM-backed tmpfs — when it's available, falling back to a `credmgr` subdirectory under the platform temp directory (e.g. on Android/Termux, where `/dev/shm` doesn't exist).
 
 - The cache is scoped to your current terminal **session ID**, so it is not usable from unrelated sessions.
 - A background watcher process automatically deletes the cached key when the timeout expires or the owning session ends.
@@ -370,7 +370,7 @@ credential-manager/
 - **Metadata is not hidden.** Service names and userids sit inside the same encrypted blob as passwords, so no metadata is visible in the file — but note that `list`/`search` output, shell history, and terminal scrollback can still leak service/userid names if your terminal or shell history isn't otherwise secured.
 - **`export` produces plaintext.** `credmgr export` intentionally prints your entire vault as unencrypted JSON to stdout; treat exported files/output with the same care as your master password.
 - **Local breach database only.** The offline breach-hash check is limited to whatever dataset you've fetched (a curated ~100k-password subset, not the full multi-hundred-million-entry HIBP corpus), so it will miss many real-world breached passwords. It also does not perform any online k-anonymity lookup.
-- **Depends on OS-level protections.** File permissions (`0600`/`0700`) and `/dev/shm` protect against other unprivileged users on the same machine, but not against a compromised account, a user with root access, or malware running as you. `credmgr` does not defend against a compromised host.
+- **Depends on OS-level protections.** File permissions (`0600`/`0700`) and the session cache directory (`/dev/shm` when available, otherwise a temp-dir fallback) protect against other unprivileged users on the same machine, but not against a compromised account, a user with root access, or malware running as you. `credmgr` does not defend against a compromised host.
 - **Clipboard exposure window.** Copied passwords remain on the system clipboard until `clipboard_timeout` elapses (default 30s) or something else overwrites the clipboard; other applications with clipboard access during that window could read it.
 - **`fork()`-based background helpers.** The session-cache cleaner and clipboard auto-clear use `os.fork()`, which is POSIX-only — **credmgr requires a Unix-like OS (Linux/macOS) and does not support native Windows** (WSL should work).
 - **No rate limiting on password attempts.** There's no lockout after repeated failed master-password attempts beyond Argon2id's inherent per-attempt cost.
