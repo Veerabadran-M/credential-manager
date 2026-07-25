@@ -87,9 +87,9 @@ Every backend is an **AEAD** (Authenticated Encryption with Associated Data) con
 
 | Backend name | Algorithm | Key/nonce | Library | Notes |
 |---|---|---|---|---|
-| `aesgcm-cryptography` (default) | AES-256-GCM | 256/96-bit | `cryptography` | Hardware-accelerated (AES-NI) on most CPUs |
+| `xchacha-pynacl` **(default)** | XChaCha20-Poly1305 | 256/192-bit | `PyNaCl` | Extended nonce further reduces nonce-reuse risk |
 | `aesgcm-pycryptodome` | AES-256-GCM | 256/96-bit | `pycryptodome` | Same algorithm; pure-C dependency, no Rust toolchain needed |
-| `xchacha-pynacl` | XChaCha20-Poly1305 | 256/192-bit | `PyNaCl` | Extended nonce further reduces nonce-reuse risk |
+| `aesgcm-cryptography` | AES-256-GCM | 256/96-bit | `cryptography` | Hardware-accelerated (AES-NI) on most CPUs |
 
 Each operation also binds a fixed AAD string (`"credmgr-dek"` or `"credmgr-vault"`), domain-separating the two contexts so a wrapped-DEK ciphertext can never be replayed as vault ciphertext. Handled once, identically, in `crypto/envelope.py`.
 
@@ -160,7 +160,7 @@ Priority chain for the first two:
 CLI option (--backend) > environment (CREDMGR_BACKEND) > config file (backend) > built-in default
 ```
 
-- **Built-in default:** first available backend in preference order (`aesgcm-cryptography`, `aesgcm-pycryptodome`, `xchacha-pynacl`), so `pip install credmgr[cryptography]` alone just works.
+- **Built-in default**: first available backend in preference order (`xchacha-pynacl`, `aesgcm-pycryptodome`, `aesgcm-cryptography`).
 - Set via config with `credmgr config set backend xchacha-pynacl` (persisted to `~/.credmgr/config.json`).
 
 This logic lives in one place, `crypto/registry.resolve_backend()`, so no command re-implements the priority order itself.
@@ -274,8 +274,8 @@ No changes needed to `registry.py`, `vault.py`, `cli.py`, or `config.py` — `pk
         "hash_len": 32,
         "salt": "<base64>"
     },
-    "backend": "aesgcm-cryptography",
-    "algorithm": "AES-256-GCM",
+    "backend": "xchacha-pynacl",
+    "algorithm": "XChaCha20-Poly1305",
     "encrypted_key": { "ciphertext": "<base64>" },
     "vault": { "ciphertext": "<base64>" }
 }
@@ -311,12 +311,12 @@ python credmgr.py <command>        # or: python -m credmgr <command>
 
 **Crypto backend (required — pick at least one):**
 ```bash
-pip install credmgr[cryptography]     # AES-256-GCM via 'cryptography' (recommended default)
-pip install credmgr[pynacl]           # XChaCha20-Poly1305 via PyNaCl
+pip install credmgr[pynacl]           # XChaCha20-Poly1305 (recommended default)
 pip install credmgr[pycryptodome]     # AES-256-GCM via pycryptodome
+pip install credmgr[cryptography]     # AES-256-GCM via cryptography
 pip install credmgr[all]              # every bundled backend
 ```
-Equivalently: `pip install cryptography>=42` / `PyNaCl>=1.5` / `pycryptodome>=3.20`.
+Equivalently: `pip install PyNaCl>=1.5` / `pycryptodome>=3.20` / `cryptography>=42`.
 
 `credmgr`'s core has no crypto dependency at all. `init`'s menu, `config show`, and `migrate` only ever offer installed backends; requesting an uninstalled one produces the actionable `pip install credmgr[...]` message shown above, never a raw `ImportError`.
 
@@ -416,7 +416,7 @@ The common-passwords list, sequence patterns, and breach-hash database are the s
 
 | Key | Default | Mutable after vault creation? | Description |
 |---|---|---|---|
-| `backend` | `aesgcm-cryptography` | ❌ (use `credmgr migrate`) | Crypto backend; overridable per-invocation via `--backend` or `CREDMGR_BACKEND` |
+| `backend` | `xchacha-pynacl` | ❌ (use `credmgr migrate`) | Crypto backend; overridable per-invocation via `--backend` or `CREDMGR_BACKEND` |
 | `argon2_time_cost` | `3` | ❌ | Argon2id iterations |
 | `argon2_memory_cost` | `65536` (KiB) | ❌ | Argon2id memory usage |
 | `argon2_parallelism` | `2` | ❌ | Argon2id threads |

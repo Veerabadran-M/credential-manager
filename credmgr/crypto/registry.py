@@ -21,7 +21,11 @@ from .exceptions import BackendUnavailableError, UnknownBackendError
 
 # Preference order used by default_backend() when several backends are
 # available and nothing more specific (CLI/env/config) picked one.
-_PREFERENCE_ORDER = ["aesgcm-cryptography", "aesgcm-pycryptodome", "xchacha-pynacl"]
+_PREFERENCE_ORDER = [
+    "xchacha-pynacl",
+    "aesgcm-pycryptodome",
+    "aesgcm-cryptography"
+]
 
 ENV_VAR = "CREDMGR_BACKEND"
 
