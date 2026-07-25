@@ -47,12 +47,7 @@ class Configuration:
     argon2_hash_len: int = 32          # bytes
 
     # Crypto plugin backend used for envelope encryption (see credmgr/crypto/).
-    # Only takes effect for newly-created vaults (credmgr init) or as the
-    # config-file layer of `credmgr migrate`'s backend selection; existing
-    # vaults always use the backend recorded in their own metadata.
-    # This is the "config file" layer of the CLI > env (CREDMGR_BACKEND) >
-    # config > default priority described in the README.
-    backend: str = "aesgcm-cryptography"
+    backend: str = "xchacha-pynacl"
 
     # Session auth cache lifetime
     auth_timeout: int = 300  # seconds
