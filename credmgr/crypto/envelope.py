@@ -6,6 +6,12 @@
 
 Rotating the master password only re-wraps the DEK under a new KEK; it
 never requires touching (or re-encrypting) the vault contents itself.
+Switching backends (see vault.migrate_backend) re-wraps the DEK *and*
+re-encrypts the vault contents, but never the master password/KDF.
+
+Every function here takes a `backend` name (not a cipher object) and looks
+it up through the registry, so this module -- like the rest of the
+application -- never imports cryptography/PyNaCl/PyCryptodome directly.
 """
 
 from __future__ import annotations
@@ -16,7 +22,7 @@ from dataclasses import dataclass, field
 
 from argon2.low_level import Type, hash_secret_raw
 
-from .ciphers import get_cipher
+from .registry import get_backend
 
 def b64e(data: bytes) -> str:
     return base64.b64encode(data).decode("ascii")
@@ -65,30 +71,28 @@ def derive_kek(master_password: str, params: KDFParams) -> bytes:
         memory_cost=params.memory_cost,
         parallelism=params.parallelism,
         hash_len=params.hash_len,
-        type=Type.ID,
+        type=Type.ID
     )
 
-def generate_dek(cipher_name: str) -> bytes:
-    return get_cipher(cipher_name).generate_key()
+def generate_dek(backend_name: str) -> bytes:
+    return get_backend(backend_name).generate_key()
 
-def wrap_dek(dek: bytes, kek: bytes, cipher_name: str) -> dict:
-    cipher = get_cipher(cipher_name)
-    nonce, ciphertext = cipher.encrypt(kek, dek, aad=b"credmgr-dek")
-    return {"nonce": b64e(nonce), "ciphertext": b64e(ciphertext)}
+def wrap_dek(dek: bytes, kek: bytes, backend_name: str) -> dict:
+    backend = get_backend(backend_name)
+    blob = backend.encrypt(kek, dek, aad=b"credmgr-dek")
+    return {"ciphertext": b64e(blob)}
 
-def unwrap_dek(wrapped: dict, kek: bytes, cipher_name: str) -> bytes:
-    cipher = get_cipher(cipher_name)
-    nonce = b64d(wrapped["nonce"])
-    ciphertext = b64d(wrapped["ciphertext"])
-    return cipher.decrypt(kek, nonce, ciphertext, aad=b"credmgr-dek")
+def unwrap_dek(wrapped: dict, kek: bytes, backend_name: str) -> bytes:
+    backend = get_backend(backend_name)
+    blob = b64d(wrapped["ciphertext"])
+    return backend.decrypt(kek, blob, aad=b"credmgr-dek")
 
-def encrypt_blob(dek: bytes, plaintext: bytes, cipher_name: str) -> dict:
-    cipher = get_cipher(cipher_name)
-    nonce, ciphertext = cipher.encrypt(dek, plaintext, aad=b"credmgr-vault")
-    return {"nonce": b64e(nonce), "ciphertext": b64e(ciphertext)}
+def encrypt_blob(dek: bytes, plaintext: bytes, backend_name: str) -> dict:
+    backend = get_backend(backend_name)
+    blob = backend.encrypt(dek, plaintext, aad=b"credmgr-vault")
+    return {"ciphertext": b64e(blob)}
 
-def decrypt_blob(dek: bytes, blob: dict, cipher_name: str) -> bytes:
-    cipher = get_cipher(cipher_name)
-    nonce = b64d(blob["nonce"])
+def decrypt_blob(dek: bytes, blob: dict, backend_name: str) -> bytes:
+    backend = get_backend(backend_name)
     ciphertext = b64d(blob["ciphertext"])
-    return cipher.decrypt(dek, nonce, ciphertext, aad=b"credmgr-vault")
+    return backend.decrypt(dek, ciphertext, aad=b"credmgr-vault")
