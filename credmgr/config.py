@@ -14,6 +14,8 @@ import tempfile
 from dataclasses import dataclass, fields
 from pathlib import Path
 
+from .crypto.registry import all_backends
+
 ARGON2_MIN_TIME_COST = 2
 ARGON2_MIN_MEMORY_COST = 19 * 1024  # KiB; OWASP minimum for Argon2id.
 ARGON2_MIN_PARALLELISM = 1
@@ -30,7 +32,7 @@ CONFIG_VALUE_LIMITS = {
     "passphrase_num_word": (3, 12),
     "clipboard_timeout": (0, 60 * 60),
     "password_max_age_days": (1, 3650),
-    "password_history_limit": (0, 1000),
+    "password_history_limit": (0, 1000)
 }
 
 @dataclass
@@ -44,9 +46,13 @@ class Configuration:
     argon2_parallelism: int = 2        # threads
     argon2_hash_len: int = 32          # bytes
 
-    # Cipher used for envelope encryption: "aes256gcm" or "xchacha20poly1305".
-    # Only takes effect for newly-created vaults (credmgr init).
-    cipher: str = "aes256gcm"
+    # Crypto plugin backend used for envelope encryption (see credmgr/crypto/).
+    # Only takes effect for newly-created vaults (credmgr init) or as the
+    # config-file layer of `credmgr migrate`'s backend selection; existing
+    # vaults always use the backend recorded in their own metadata.
+    # This is the "config file" layer of the CLI > env (CREDMGR_BACKEND) >
+    # config > default priority described in the README.
+    backend: str = "aesgcm-cryptography"
 
     # Session auth cache lifetime
     auth_timeout: int = 300  # seconds
@@ -132,7 +138,7 @@ class Configuration:
     @property
     def immutable_parameters(self) -> list:
         return ["master_dir", "argon2_time_cost", "argon2_memory_cost", 
-                "argon2_parallelism", "argon2_hash_len", "cipher"]
+                "argon2_parallelism", "argon2_hash_len", "backend"]
 
     # ---- persistence ----
 
@@ -145,10 +151,7 @@ class Configuration:
             with self.settings_file.open("r", encoding="utf-8") as f:
                 raw = json.load(f)
         except json.JSONDecodeError as e:
-            raise ValueError(
-                f"Configuration file is not valid JSON: {self.settings_file}. "
-                "Fix or remove it, then run credmgr again."
-            ) from e
+            raise ValueError(f"Configuration file is not valid JSON: {self.settings_file}. Fix or remove it, then run credmgr again.") from e
         except OSError as e:
             raise ValueError(f"Unable to read configuration file: {self.settings_file}") from e
 
@@ -201,8 +204,10 @@ class Configuration:
         return parsed
 
     def _validate_value(self, key: str, value) -> None:
-        if key == "cipher" and value not in ("aes256gcm", "xchacha20poly1305"):
-            raise ValueError("cipher must be 'aes256gcm' or 'xchacha20poly1305'")
+        if key == "backend":
+            known = all_backends()
+            if known and value not in known:
+                raise ValueError(f"backend must be one of: {', '.join(sorted(known))}")
 
         limits = CONFIG_VALUE_LIMITS.get(key)
         if limits is None:

@@ -6,17 +6,13 @@ import argparse
 import json
 import time
 
-from .crypto.ciphers import SUPPORTED_CIPHERS
 from . import audit as audit_mod
 from . import datasources
 from .clipboard import copy_to_clipboard
-from .config import (
-    ARGON2_MAX_MEMORY_COST,
-    ARGON2_MIN_MEMORY_COST,
-    ARGON2_MIN_PARALLELISM,
-    ARGON2_MIN_TIME_COST,
-    config,
-)
+from .config import (ARGON2_MAX_MEMORY_COST, ARGON2_MIN_MEMORY_COST, ARGON2_MIN_PARALLELISM, 
+                     ARGON2_MIN_TIME_COST, config)
+from .crypto import BackendUnavailableError, CryptoError, UnknownBackendError
+from .crypto.registry import available_backends, get_backend, resolve_backend
 from .generator import generate_passphrase, generate_password
 from .models import Account, Credentials, PasswordHistoryEntry
 from .search import global_search, resolve_for_mutation, search_accounts, search_services
@@ -66,14 +62,10 @@ def _validate_secret_options(*, length: int, words: int) -> None:
 def get_password(args) -> str:
     _validate_secret_options(length=args.length, words=args.words)
     if getattr(args, "generate", False):
-        password = (
-            generate_passphrase(args.words) if args.passphrase else generate_password(args.length)
-        )
+        password = (generate_passphrase(args.words) if args.passphrase else generate_password(args.length))
         label = "Passphrase" if args.passphrase else "Password"
 
-        console.print(
-            f"\n[bold cyan]Generated {label}:[/bold cyan] [bold white]{password}[/bold white]"
-        )
+        console.print(f"\n[bold cyan]Generated {label}:[/bold cyan] [bold white]{password}[/bold white]")
         copy_to_clipboard(password, label=label)
         console.print()
         return password
@@ -93,29 +85,58 @@ def _report_fetch_results(results) -> None:
         else:
             console.print(f"  [yellow]\u2717[/yellow] {r.name}: could not fetch ({r.detail}); using built-in default")
 
-def cmd_init(skip_data_fetch: bool = False) -> None:
+def _choose_backend_interactively() -> str:
+    backends = available_backends()
+    if not backends:
+        fatal(
+            "No cryptographic backend is available. Install at least one of:\n"
+            "  pip install credmgr[cryptography]\n"
+            "  pip install credmgr[pynacl]\n"
+            "  pip install credmgr[pycryptodome]\n"
+            "or simply: pip install credmgr[all]"
+        )
+
+    # Stable order: whatever resolve_backend()/default_backend() would pick
+    # first is shown (and defaulted to) first.
+    default_name = resolve_backend(config_value=config.backend)
+    ordered = sorted(backends, key=lambda n: (n != default_name, n))
+
+    console.print("\nSelect the encryption backend for this vault:", style="bold cyan")
+    numbers = [str(i) for i in range(1, len(ordered) + 1)]
+    for num, name in zip(numbers, ordered):
+        algorithm = get_backend(name).algorithm
+        suffix = " (Recommended/Default)" if name == default_name else ""
+        console.print(f"  [{num}] [white]{algorithm}[/white] ({name}){suffix}")
+    console.print()
+    console.print(
+        "[bold yellow]Note:[/] This choice determines how all credentials are encrypted. "
+        "Once the vault is created, switching backends requires 'credmgr migrate'. "
+        "Choose carefully."
+    )
+
+    default_num = numbers[ordered.index(default_name)] if default_name in ordered else numbers[0]
+    choice = ask_choice("Encryption backend", numbers, default_num)
+    backend_name = ordered[int(choice) - 1]
+    console.print(f"Selected: [bold green]{get_backend(backend_name).algorithm}[/] ({backend_name})")
+    return backend_name
+
+def cmd_init(skip_data_fetch: bool = False, backend: str | None = None) -> None:
 
     if config.vault_file.exists():
         console.print("Vault already initialized.", style="bold blue")
         return
-    
-    console.print("\nSelect the encryption algorithm for this vault:", style="bold cyan")
-    console.print("  [1] [white]AES-256-GCM[/white] (Recommended/Default)")
-    console.print("  [2] XChaCha20-Poly1305")
-    console.print()
-    console.print(
-        "[bold yellow]Note:[/] This choice determines how all credentials are encrypted. "
-        "Once the vault is created, changing it requires decrypting and re-encrypting the "
-        "entire vault. Choose carefully."
-    )
 
-    choice = ask_choice("Encryption algorithm", ["1", "2"], "1")
+    if backend:
+        # Explicit --backend on `init` skips the interactive prompt entirely.
+        try:
+            get_backend(backend)
+        except (UnknownBackendError, BackendUnavailableError) as e:
+            fatal(str(e))
+        console.print(f"Using backend: [bold green]{get_backend(backend).algorithm}[/] ({backend})")
+    else:
+        backend = _choose_backend_interactively()
 
-    if choice in SUPPORTED_CIPHERS:
-        cipher, name = SUPPORTED_CIPHERS[choice]
-        console.print(f"Selected: [bold green]{name}[/]")
-
-    config.cipher = cipher
+    config.backend = backend
 
     console.print("\nSet parameters for the Argon2 key derivation function:", style="bold magenta")
     console.print(
@@ -137,21 +158,21 @@ def cmd_init(skip_data_fetch: bool = False) -> None:
             "Argon2 time cost",
             default=config.argon2_time_cost,
             min_value=ARGON2_MIN_TIME_COST,
-            max_value=20,
+            max_value=20
         )
 
         config.argon2_memory_cost = ask_int(
             "Argon2 memory cost (KiB)",
             default=config.argon2_memory_cost,
             min_value=ARGON2_MIN_MEMORY_COST,
-            max_value=ARGON2_MAX_MEMORY_COST,
+            max_value=ARGON2_MAX_MEMORY_COST
         )
 
         config.argon2_parallelism = ask_int(
             "Argon2 parallelism",
             default=config.argon2_parallelism,
             min_value=ARGON2_MIN_PARALLELISM,
-            max_value=16,
+            max_value=16
         )
 
         console.print("\nSelected Argon2 parameters:", style="bold green")
@@ -173,7 +194,7 @@ def cmd_init(skip_data_fetch: bool = False) -> None:
         fatal("Passwords do not match.")
 
     console.print("Deriving key (this takes a moment)…", style="bold yellow")
-    vault.create(cipher, master)
+    vault.create(backend, master)
 
     console.print("Vault created and master password set.", style="bold green")
 
@@ -212,10 +233,40 @@ def cmd_passwd() -> None:
 
     try:
         vault.rotate_master_password(old, new)
-    except AuthenticationError as e:
+    except (AuthenticationError, BackendUnavailableError, VaultError) as e:
         fatal(str(e))
 
     console.print("Master password changed.", style="bold green")
+
+def cmd_migrate(new_backend: str | None) -> None:
+    """Re-encrypt the vault under a different crypto backend.
+
+    Backend selection follows CLI > environment (CREDMGR_BACKEND) > config
+    file > built-in default, same as everywhere else backends are chosen.
+    """
+    vault = Vault(config)
+    if not vault.exists():
+        fatal("No vault found. Run 'credmgr init' first.")
+
+    target = resolve_backend(cli_value=new_backend, config_value=config.backend)
+
+    try:
+        get_backend(target)  # fail fast, before prompting for the password
+    except (UnknownBackendError, BackendUnavailableError) as e:
+        fatal(str(e))
+
+    master = safe_getpass("Master password: ")
+
+    try:
+        vault.migrate_backend(master, target)
+    except (AuthenticationError, BackendUnavailableError, VaultError) as e:
+        fatal(str(e))
+
+    # The DEK changed, so any cached session key is now stale.
+    from .auth import delete_cache, session_cache_paths  # local import: avoids a circular import at load time
+    delete_cache(session_cache_paths())
+
+    console.print(f"Vault migrated to backend '[bold green]{target}[/]' ({get_backend(target).algorithm}).", style="bold green")
 
 def cmd_config(args) -> None:
     action = getattr(args, "config_command", None) or "show"
@@ -230,18 +281,15 @@ def cmd_config(args) -> None:
         if args.key in config.immutable_parameters and Vault(config).exists():
             fatal(
                 f"'{args.key}' is fixed for the existing vault. To use a different "
-                "cipher or Argon2 work factor, create a new vault and import data "
-                "into it."
+                "backend, run 'credmgr migrate --backend <name>'. To change the "
+                "Argon2 work factor, create a new vault and import data into it."
             )
         try:
             config.set_value(args.key, args.value)
         except (KeyError, ValueError) as e:
             fatal(str(e))
         config.save()
-        console.print(
-            f"Set [bold cyan]{args.key}[/bold cyan] = [white]{getattr(config, args.key)}[/white]",
-            style="bold green",
-        )
+        console.print(f"Set [bold cyan]{args.key}[/bold cyan] = [white]{getattr(config, args.key)}[/white]", style="bold green")
         return
 
     if action == "reset":
@@ -261,10 +309,7 @@ def cmd_list(creds: Credentials) -> None:
         return
 
     for service, accounts in creds.services.items():
-        console.print(
-            f"{service}  ({len(accounts)} account{'s' if len(accounts) != 1 else ''})",
-            style="bold magenta"
-        )
+        console.print(f"{service}  ({len(accounts)} account{'s' if len(accounts) != 1 else ''})", style="bold magenta")
         for acc in accounts:
             console.print(f"  - {acc.userid}", style="white")
 
@@ -314,7 +359,7 @@ def cmd_copy(creds: Credentials, service, userid) -> None:
     if len(matched_services) > 1:
         console.print(
             f"Ambiguous service '{service}'. Be more specific. Matches: {', '.join(matched_services)}",
-            style="bold yellow",
+            style="bold yellow"
         )
         return
     svc = matched_services[0]
@@ -627,6 +672,7 @@ credmgr config set password_max_age_days 60
 credmgr passwd
 credmgr delete netflix alice
 credmgr export
+credmgr migrate --backend xchacha-pynacl
 """
     )
 
@@ -634,11 +680,15 @@ credmgr export
 
     p_init = sub.add_parser("init", help="Initialize the credential vault")
     p_init.add_argument("--skip-data-fetch", action="store_true", help="Don't download the wordlist/common-passwords/breach-hash datasets; use built-in defaults")
-    
+    p_init.add_argument("--backend", default=None, metavar="NAME", help="Crypto backend to use (skips the interactive prompt); see 'credmgr config show'")
+
     sub.add_parser("fetch-data", help="(Re-)download the wordlist, common-passwords, sequences, and breached-hash datasets")
     sub.add_parser("list", help="List all stored services and accounts")
     sub.add_parser("audit", help="Run a password health audit")
     sub.add_parser("passwd", help="Change the master password")
+
+    p_migrate = sub.add_parser("migrate", help="Re-encrypt the vault under a different crypto backend")
+    p_migrate.add_argument("--backend", default=None, metavar="NAME", help="Target backend name (default: env CREDMGR_BACKEND, then config, then built-in default)")
 
     p = sub.add_parser("get", help="Display stored credentials")
     p.add_argument("service")
@@ -708,7 +758,7 @@ def main() -> None:
 
     # Commands that touch neither the vault nor the master password.
     if args.command == "init":
-        cmd_init(skip_data_fetch=args.skip_data_fetch)
+        cmd_init(skip_data_fetch=args.skip_data_fetch, backend=args.backend)
         return
     if args.command == "fetch-data":
         cmd_fetch_data()
@@ -721,6 +771,9 @@ def main() -> None:
         return
     if args.command == "passwd":
         cmd_passwd()
+        return
+    if args.command == "migrate":
+        cmd_migrate(args.backend)
         return
 
     if not Vault(config).exists():

@@ -14,6 +14,7 @@ import os
 import time
 
 from .config import config
+from .crypto import BackendUnavailableError
 from .ui import fatal, safe_getpass
 from .vault import AuthenticationError, Vault
 
@@ -107,11 +108,13 @@ def authenticate(fresh: bool = False):
                 return cached_dek, creds
             except AuthenticationError:
                 pass  # stale/invalid cache entry -- fall through to a fresh prompt
+            except BackendUnavailableError as e:
+                fatal(str(e))
 
     entered = safe_getpass("Master password: ")
     try:
         dek, creds = vault.unlock(entered)
-    except AuthenticationError as e:
+    except (AuthenticationError, BackendUnavailableError) as e:
         fatal(str(e))
 
     if not fresh:
