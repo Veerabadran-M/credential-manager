@@ -824,7 +824,7 @@ def main() -> None:
                     mutated = cmd_update_userid(creds, args.service, args.userid, args.new_value)
 
                 case "password":
-                    password = get_password(args) if args.generate else safe_getpass("New password: ")
+                    password = get_password(args)
                     mutated = cmd_update_password(creds, args.service, args.userid, password)
 
                 case "notes":
