@@ -262,6 +262,11 @@ def cmd_migrate(new_backend: str | None) -> None:
     except (AuthenticationError, BackendUnavailableError, VaultError) as e:
         fatal(str(e))
 
+    # Update "backend" value in config
+    if config.backend != target:
+        config.backend = target
+        config.save()
+
     # The DEK changed, so any cached session key is now stale.
     from .auth import delete_cache, session_cache_paths  # local import: avoids a circular import at load time
     delete_cache(session_cache_paths())
