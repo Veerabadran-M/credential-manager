@@ -329,6 +329,16 @@ Equivalently: `pip install PyNaCl>=1.5` / `pycryptodome>=3.20` / `cryptography>=
 | `PyNaCl` | `xchacha-pynacl` backend | Optional (`credmgr[pynacl]`) |
 | `pycryptodome` | `aesgcm-pycryptodome` backend | Optional (`credmgr[pycryptodome]`) |
 
+**Termux (Android):** `PyNaCl` doesn't ship a prebuilt wheel for Termux, so pip tries to build `libsodium` from source, which fails on many devices. Installing the system `libsodium` package and pointing the build at it works around this — the default `xchacha-pynacl` backend does **not** require falling back to `pycryptodome` on Termux:
+
+```bash
+pkg install libsodium clang pkg-config
+export SODIUM_INSTALL=system
+pip install "credmgr[pynacl] @ git+https://github.com/Veerabadran-M/credential-manager.git"
+```
+
+`SODIUM_INSTALL=system` must be set before installing `PyNaCl` (directly or as a `credmgr` extra) on Termux — without it, the build tries to compile its own bundled `libsodium` and fails.
+
 ---
 
 ## Getting Started
