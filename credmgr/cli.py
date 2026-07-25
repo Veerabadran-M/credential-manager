@@ -1,17 +1,20 @@
-"""Command-line interface: argument parsing and command dispatch."""
+"""Command-line interface: Typer-based argument parsing and command dispatch."""
 
 from __future__ import annotations
 
-import argparse
 import json
 import time
+from enum import Enum
+from typing import Optional
+
+import typer
 
 from . import audit as audit_mod
 from . import datasources
 from .clipboard import copy_to_clipboard
-from .config import (ARGON2_MAX_MEMORY_COST, ARGON2_MIN_MEMORY_COST, ARGON2_MIN_PARALLELISM, 
+from .config import (ARGON2_MAX_MEMORY_COST, ARGON2_MIN_MEMORY_COST, ARGON2_MIN_PARALLELISM,
                      ARGON2_MIN_TIME_COST, config)
-from .crypto import BackendUnavailableError, CryptoError, UnknownBackendError
+from .crypto import BackendUnavailableError, UnknownBackendError
 from .crypto.registry import available_backends, get_backend, resolve_backend
 from .generator import generate_passphrase, generate_password
 from .models import Account, Credentials, PasswordHistoryEntry
@@ -59,11 +62,11 @@ def _validate_secret_options(*, length: int, words: int) -> None:
     if words < 3 or words > 12:
         fatal("Passphrase word count must be between 3 and 12.")
 
-def get_password(args) -> str:
-    _validate_secret_options(length=args.length, words=args.words)
-    if getattr(args, "generate", False):
-        password = (generate_passphrase(args.words) if args.passphrase else generate_password(args.length))
-        label = "Passphrase" if args.passphrase else "Password"
+def get_password(*, generate: bool = False, passphrase: bool = False, length: int, words: int) -> str:
+    _validate_secret_options(length=length, words=words)
+    if generate:
+        password = (generate_passphrase(words) if passphrase else generate_password(length))
+        label = "Passphrase" if passphrase else "Password"
 
         console.print(f"\n[bold cyan]Generated {label}:[/bold cyan] [bold white]{password}[/bold white]")
         copy_to_clipboard(password, label=label)
@@ -75,6 +78,24 @@ def get_password(args) -> str:
 def _push_history(acc: Account) -> None:
     acc.history.insert(0, PasswordHistoryEntry(password=acc.password, changed_at=acc.updated_at))
     del acc.history[config.password_history_limit:]
+
+def _load_authenticated() -> tuple[bytes, Credentials, Vault]:
+    """Ensure a vault exists and authenticate against it. Used by every
+    command that operates on stored credentials."""
+    if not Vault(config).exists():
+        fatal("No vault found. Run 'credmgr init' first.")
+
+    from .auth import authenticate  # local import: avoids a circular import at load time
+
+    dek, creds = authenticate()
+    return dek, creds, Vault(config)
+
+def _save_if_mutated(vault: Vault, creds: Credentials, dek: bytes, mutated: bool) -> None:
+    if mutated:
+        try:
+            vault.save(creds, dek)
+        except VaultError as e:
+            fatal(str(e))
 
 ''' ------------------------------ COMMANDS: SETUP ------------------------------ '''
 
@@ -147,11 +168,7 @@ def cmd_init(skip_data_fetch: bool = False, backend: str | None = None) -> None:
         "but also increases the time and memory required to unlock the vault."
     )
 
-    advanced = ask_choice(
-        "\nConfigure Argon2 parameters manually?",
-        ["y", "n"],
-        "n"
-    )
+    advanced = ask_choice("\nConfigure Argon2 parameters manually?", ["y", "n"], "n")
 
     if advanced == "y":
         config.argon2_time_cost = ask_int(
@@ -204,7 +221,7 @@ def cmd_init(skip_data_fetch: bool = False, backend: str | None = None) -> None:
         console.print(f"Fetching security datasets into {config.data_dir} …", style="bold cyan")
         results = datasources.fetch_all(config)
         _report_fetch_results(results)
-    
+
     config.save()
 
     console.print("Use 'add' to start storing credentials securely.", style="bold magenta")
@@ -273,38 +290,33 @@ def cmd_migrate(new_backend: str | None) -> None:
 
     console.print(f"Vault migrated to backend '[bold green]{target}[/]' ({get_backend(target).algorithm}).", style="bold green")
 
-def cmd_config(args) -> None:
-    action = getattr(args, "config_command", None) or "show"
+def cmd_config_show() -> None:
+    for key, value in config.as_dict().items():
+        colour = "red" if key in config.immutable_parameters else "cyan"
+        console.print(f"  [bold {colour}]{key}[/bold {colour}] = [white]{value}[/white]")
 
-    if action == "show":
-        for key, value in config.as_dict().items():
-            colour = "red" if key in config.immutable_parameters else "cyan"
-            console.print(f"  [bold {colour}]{key}[/bold {colour}] = [white]{value}[/white]")
+def cmd_config_set(key: str, value: str) -> None:
+    if key in config.immutable_parameters and Vault(config).exists():
+        fatal(
+            f"'{key}' is fixed for the existing vault. To use a different "
+            "backend, run 'credmgr migrate --backend <name>'. To change the "
+            "Argon2 work factor, create a new vault and import data into it."
+        )
+    try:
+        config.set_value(key, value)
+    except (KeyError, ValueError) as e:
+        fatal(str(e))
+    config.save()
+    console.print(f"Set [bold cyan]{key}[/bold cyan] = [white]{getattr(config, key)}[/white]", style="bold green")
+
+def cmd_config_reset() -> None:
+    confirm = input("Reset all configuration to defaults? [y/N] ").strip().lower()
+    if confirm != "y":
+        print("Aborted.")
         return
-
-    if action == "set":
-        if args.key in config.immutable_parameters and Vault(config).exists():
-            fatal(
-                f"'{args.key}' is fixed for the existing vault. To use a different "
-                "backend, run 'credmgr migrate --backend <name>'. To change the "
-                "Argon2 work factor, create a new vault and import data into it."
-            )
-        try:
-            config.set_value(args.key, args.value)
-        except (KeyError, ValueError) as e:
-            fatal(str(e))
-        config.save()
-        console.print(f"Set [bold cyan]{args.key}[/bold cyan] = [white]{getattr(config, args.key)}[/white]", style="bold green")
-        return
-
-    if action == "reset":
-        confirm = input("Reset all configuration to defaults? [y/N] ").strip().lower()
-        if confirm != "y":
-            print("Aborted.")
-            return
-        if config.settings_file.exists():
-            config.settings_file.unlink()
-        console.print("Configuration reset to defaults.", style="bold green")
+    if config.settings_file.exists():
+        config.settings_file.unlink()
+    console.print("Configuration reset to defaults.", style="bold green")
 
 ''' ------------------------------ COMMANDS: READ ------------------------------ '''
 
@@ -579,7 +591,7 @@ def cmd_import(creds: Credentials, filepath: str) -> None:
                 password=acc_data["password"],
                 notes=acc_data.get("notes", ""),
                 created_at=now,
-                updated_at=now,
+                updated_at=now
             ))
 
     console.print("Import completed.", style="bold green")
@@ -650,212 +662,221 @@ def cmd_audit(creds: Credentials) -> None:
             "one SHA-1 password hash per line (see README).[/dim]"
         )
 
-''' ------------------------------ CLI ------------------------------ '''
+''' ------------------------------ CLI (Typer) ------------------------------ '''
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Secure Credential Manager CLI tool",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""\
-Examples:
-credmgr init
-credmgr fetch-data
-credmgr add netflix alice
-credmgr add netflix alice --generate
-credmgr add netflix alice --generate --passphrase
-credmgr add netflix alice --notes "backup email is alice@x.com"
-credmgr generate
-credmgr copy netflix
-credmgr get netflix alice
-credmgr search netflix
-credmgr update netflix alice password --generate
-credmgr update netflix alice notes "backup email is alice@x.com"
-credmgr history netflix alice
-credmgr audit
-credmgr config show
-credmgr config set password_max_age_days 60
-credmgr passwd
-credmgr delete netflix alice
-credmgr export
-credmgr migrate --backend xchacha-pynacl
+app = typer.Typer(
+    name="credmgr",
+    help="Secure Credential Manager CLI tool",
+    no_args_is_help=True,
+    add_completion=False,
+    epilog="""\
+Examples:\n
+credmgr init\n
+credmgr fetch-data\n
+credmgr add netflix alice\n
+credmgr add netflix alice --generate\n
+credmgr add netflix alice --generate --passphrase\n
+credmgr add netflix alice --notes "backup email is alice@x.com"\n
+credmgr generate\n
+credmgr copy netflix\n
+credmgr get netflix alice\n
+credmgr search netflix\n
+credmgr update netflix alice password --generate\n
+credmgr update netflix alice notes "backup email is alice@x.com"\n
+credmgr history netflix alice\n
+credmgr audit\n
+credmgr config show\n
+credmgr config set password_max_age_days 60\n
+credmgr passwd\n
+credmgr delete netflix alice\n
+credmgr export\n
+credmgr migrate --backend aesgcm-cryptography
 """
+)
+
+config_app = typer.Typer(help="View or edit configuration", no_args_is_help=False)
+app.add_typer(config_app, name="config")
+
+class UpdateField(str, Enum):
+    userid = "userid"
+    password = "password"
+    notes = "notes"
+    account = "account"
+
+''' -------- setup commands (no vault / no auth required) -------- '''
+
+@app.command(name="init", help="Initialize the credential vault")
+def init_cmd(
+    skip_data_fetch: bool = typer.Option(
+        False, "--skip-data-fetch",
+        help="Don't download the wordlist/common-passwords/breach-hash datasets; use built-in defaults",
+    ),
+    backend: Optional[str] = typer.Option(
+        None, "--backend", metavar="NAME",
+        help="Crypto backend to use (skips the interactive prompt); see 'credmgr config show'",
     )
+) -> None:
+    cmd_init(skip_data_fetch=skip_data_fetch, backend=backend)
 
-    sub = parser.add_subparsers(dest="command")
+@app.command(name="fetch-data", help="(Re-)download the wordlist, common-passwords, sequences, and breached-hash datasets")
+def fetch_data_cmd() -> None:
+    cmd_fetch_data()
 
-    p_init = sub.add_parser("init", help="Initialize the credential vault")
-    p_init.add_argument("--skip-data-fetch", action="store_true", help="Don't download the wordlist/common-passwords/breach-hash datasets; use built-in defaults")
-    p_init.add_argument("--backend", default=None, metavar="NAME", help="Crypto backend to use (skips the interactive prompt); see 'credmgr config show'")
+@app.command(name="passwd", help="Change the master password")
+def passwd_cmd() -> None:
+    cmd_passwd()
 
-    sub.add_parser("fetch-data", help="(Re-)download the wordlist, common-passwords, sequences, and breached-hash datasets")
-    sub.add_parser("list", help="List all stored services and accounts")
-    sub.add_parser("audit", help="Run a password health audit")
-    sub.add_parser("passwd", help="Change the master password")
+@app.command(name="migrate", help="Re-encrypt the vault under a different crypto backend")
+def migrate_cmd(
+    backend: Optional[str] = typer.Option(
+        None, "--backend", metavar="NAME",
+        help="Target backend name (default: env CREDMGR_BACKEND, then config, then built-in default)",
+    )
+) -> None:
+    cmd_migrate(backend)
 
-    p_migrate = sub.add_parser("migrate", help="Re-encrypt the vault under a different crypto backend")
-    p_migrate.add_argument("--backend", default=None, metavar="NAME", help="Target backend name (default: env CREDMGR_BACKEND, then config, then built-in default)")
+@app.command(name="generate", help="Generate a random password or passphrase")
+def generate_cmd(
+    passphrase: bool = typer.Option(False, "--passphrase"),
+    length: int = typer.Option(config.password_length, "--length", metavar="N"),
+    words: int = typer.Option(config.passphrase_num_word, "--words", metavar="N")
+) -> None:
+    cmd_generate(passphrase, length, words)
 
-    p = sub.add_parser("get", help="Display stored credentials")
-    p.add_argument("service")
-    p.add_argument("userid", nargs="?", default=None)
+''' -------- config sub-app -------- '''
 
-    p = sub.add_parser("search", help="Search services, userids, and notes")
-    p.add_argument("query")
+@config_app.callback(invoke_without_command=True)
+def config_callback(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        cmd_config_show()
 
-    p = sub.add_parser("generate", help="Generate a random password or passphrase")
-    p.add_argument("--passphrase", action="store_true")
-    p.add_argument("--length", type=int, default=config.password_length, metavar="N")
-    p.add_argument("--words", type=int, default=config.passphrase_num_word, metavar="N")
+@config_app.command(name="show", help="Show current configuration")
+def config_show_cmd() -> None:
+    cmd_config_show()
 
-    p = sub.add_parser("copy", help="Copy a password to the clipboard")
-    p.add_argument("service")
-    p.add_argument("userid", nargs="?", default=None)
+@config_app.command(name="set", help="Set a configuration value")
+def config_set_cmd(key: str, value: str) -> None:
+    cmd_config_set(key, value)
 
-    p = sub.add_parser("add", help="Add a new account")
-    p.add_argument("service")
-    p.add_argument("userid")
-    p.add_argument("--generate", action="store_true")
-    p.add_argument("--passphrase", action="store_true")
-    p.add_argument("--length", type=int, default=config.password_length, metavar="N")
-    p.add_argument("--words", type=int, default=config.passphrase_num_word, metavar="N")
-    p.add_argument("--notes", "-n", default="", metavar="TEXT")
+@config_app.command(name="reset", help="Reset configuration to defaults")
+def config_reset_cmd() -> None:
+    cmd_config_reset()
 
-    p = sub.add_parser("update", help="Update an existing account")
-    p.add_argument("service")
-    p.add_argument("userid")
-    p.add_argument("field", choices=["userid", "password", "notes", "account"], metavar="field")
-    p.add_argument("new_value", nargs="?", default=None)
-    p.add_argument("--generate", action="store_true")
-    p.add_argument("--passphrase", action="store_true")
-    p.add_argument("--length", type=int, default=config.password_length, metavar="N")
-    p.add_argument("--words", type=int, default=config.passphrase_num_word, metavar="N")
+''' -------- read commands (vault + auth required) -------- '''
 
-    p = sub.add_parser("history", help="Show password history for an account")
-    p.add_argument("service")
-    p.add_argument("userid")
+@app.command(name="list", help="List all stored services and accounts")
+def list_cmd() -> None:
+    _, creds, _ = _load_authenticated()
+    cmd_list(creds)
 
-    p = sub.add_parser("delete", help="Delete a service or account")
-    p.add_argument("service")
-    p.add_argument("userid", nargs="?", default=None)
+@app.command(name="audit", help="Run a password health audit")
+def audit_cmd() -> None:
+    _, creds, _ = _load_authenticated()
+    cmd_audit(creds)
 
-    p = sub.add_parser("import", help="Import credentials from a plaintext JSON file")
-    p.add_argument("filepath")
+@app.command(name="get", help="Display stored credentials")
+def get_cmd(
+    service: str,
+    userid: Optional[str] = typer.Argument(None)
+) -> None:
+    _, creds, _ = _load_authenticated()
+    cmd_get(creds, service, userid)
 
-    sub.add_parser("export", help="Print all credentials as plain JSON")
+@app.command(name="search", help="Search services, userids, and notes")
+def search_cmd(query: str) -> None:
+    _, creds, _ = _load_authenticated()
+    cmd_search(creds, query)
 
-    p_config = sub.add_parser("config", help="View or edit configuration")
-    config_sub = p_config.add_subparsers(dest="config_command")
-    config_sub.add_parser("show", help="Show current configuration")
-    p = config_sub.add_parser("set", help="Set a configuration value")
-    p.add_argument("key")
-    p.add_argument("value")
-    config_sub.add_parser("reset", help="Reset configuration to defaults")
+@app.command(name="copy", help="Copy a password to the clipboard")
+def copy_cmd(
+    service: str,
+    userid: Optional[str] = typer.Argument(None)
+) -> None:
+    _, creds, _ = _load_authenticated()
+    cmd_copy(creds, service, userid)
 
-    return parser
+@app.command(name="history", help="Show password history for an account")
+def history_cmd(service: str, userid: str) -> None:
+    _, creds, _ = _load_authenticated()
+    cmd_history(creds, service, userid)
 
-def main() -> None:
-    parser = build_parser()
-    args = parser.parse_args()
+''' -------- write commands (vault + auth required, may persist) -------- '''
 
-    if args.command is None:
-        parser.print_help()
-        return
+@app.command(name="add", help="Add a new account")
+def add_cmd(
+    service: str,
+    userid: str,
+    generate: bool = typer.Option(False, "--generate"),
+    passphrase: bool = typer.Option(False, "--passphrase"),
+    length: int = typer.Option(config.password_length, "--length", metavar="N"),
+    words: int = typer.Option(config.passphrase_num_word, "--words", metavar="N"),
+    notes: str = typer.Option("", "--notes", "-n", metavar="TEXT")
+) -> None:
+    dek, creds, vault = _load_authenticated()
+    password = get_password(generate=generate, passphrase=passphrase, length=length, words=words)
+    cmd_add(creds, service, userid, password, notes=notes)
+    _save_if_mutated(vault, creds, dek, True)
 
-    # Commands that touch neither the vault nor the master password.
-    if args.command == "init":
-        cmd_init(skip_data_fetch=args.skip_data_fetch, backend=args.backend)
-        return
-    if args.command == "fetch-data":
-        cmd_fetch_data()
-        return
-    if args.command == "generate":
-        cmd_generate(args.passphrase, args.length, args.words)
-        return
-    if args.command == "config":
-        cmd_config(args)
-        return
-    if args.command == "passwd":
-        cmd_passwd()
-        return
-    if args.command == "migrate":
-        cmd_migrate(args.backend)
-        return
-
-    if not Vault(config).exists():
-        fatal("No vault found. Run 'credmgr init' first.")
-
-    # Export always re-authenticates fresh, regardless of the session cache.
-    if args.command == "export":
-        cmd_export()
-        return
-
-    from .auth import authenticate  # local import: avoids a circular import at load time
-
-    dek, creds = authenticate()
-    vault = Vault(config)
+@app.command(name="update", help="Update an existing account")
+def update_cmd(
+    service: str,
+    userid: str,
+    field: UpdateField,
+    new_value: Optional[str] = typer.Argument(None),
+    generate: bool = typer.Option(False, "--generate"),
+    passphrase: bool = typer.Option(False, "--passphrase"),
+    length: int = typer.Option(config.password_length, "--length", metavar="N"),
+    words: int = typer.Option(config.passphrase_num_word, "--words", metavar="N")
+) -> None:
+    dek, creds, vault = _load_authenticated()
     mutated = False
 
-    match args.command:
-        case "list":
-            cmd_list(creds)
+    match field:
+        case UpdateField.userid:
+            if not new_value:
+                fatal("'update … userid' requires a <new_value> argument.")
+            mutated = cmd_update_userid(creds, service, userid, new_value)
 
-        case "get":
-            cmd_get(creds, args.service, args.userid)
+        case UpdateField.password:
+            password = get_password(generate=generate, passphrase=passphrase, length=length, words=words)
+            mutated = cmd_update_password(creds, service, userid, password)
 
-        case "search":
-            cmd_search(creds, args.query)
+        case UpdateField.notes:
+            if new_value is None:
+                fatal("'update … notes' requires a <new_value> argument.")
+            mutated = cmd_update_notes(creds, service, userid, new_value)
 
-        case "copy":
-            cmd_copy(creds, args.service, args.userid)
+        case UpdateField.account:
+            if not new_value:
+                fatal("'update … account' requires a <new_value> argument.")
+            password = get_password(generate=generate, passphrase=passphrase, length=length, words=words)
+            mutated = cmd_update_account(creds, service, userid, new_value, password)
 
-        case "history":
-            cmd_history(creds, args.service, args.userid)
+    _save_if_mutated(vault, creds, dek, mutated)
 
-        case "add":
-            password = get_password(args)
-            cmd_add(creds, args.service, args.userid, password, notes=args.notes)
-            mutated = True
+@app.command(name="delete", help="Delete a service or account")
+def delete_cmd(
+    service: str,
+    userid: Optional[str] = typer.Argument(None)
+) -> None:
+    dek, creds, vault = _load_authenticated()
+    mutated = cmd_delete(creds, service, userid)
+    _save_if_mutated(vault, creds, dek, mutated)
 
-        case "update":
-            match args.field:
-                case "userid":
-                    if not args.new_value:
-                        fatal("'update … userid' requires a <new_value> argument.")
-                    mutated = cmd_update_userid(creds, args.service, args.userid, args.new_value)
+@app.command(name="import", help="Import credentials from a plaintext JSON file")
+def import_cmd(filepath: str) -> None:
+    dek, creds, vault = _load_authenticated()
+    cmd_import(creds, filepath)
+    _save_if_mutated(vault, creds, dek, True)
 
-                case "password":
-                    password = get_password(args)
-                    mutated = cmd_update_password(creds, args.service, args.userid, password)
+@app.command(name="export", help="Print all credentials as plain JSON")
+def export_cmd() -> None:
+    if not Vault(config).exists():
+        fatal("No vault found. Run 'credmgr init' first.")
+    cmd_export()
 
-                case "notes":
-                    if args.new_value is None:
-                        fatal("'update … notes' requires a <new_value> argument.")
-                    mutated = cmd_update_notes(creds, args.service, args.userid, args.new_value)
-
-                case "account":
-                    if not args.new_value:
-                        fatal("'update … account' requires a <new_value> argument.")
-                    password = get_password(args)
-                    mutated = cmd_update_account(creds, args.service, args.userid, args.new_value, password)
-
-        case "delete":
-            mutated = cmd_delete(creds, args.service, args.userid)
-
-        case "import":
-            cmd_import(creds, args.filepath)
-            mutated = True
-
-        case "audit":
-            cmd_audit(creds)
-
-        case _:
-            parser.print_help()
-
-    if mutated:
-        try:
-            vault.save(creds, dek)
-        except VaultError as e:
-            fatal(str(e))
+def main() -> None:
+    app()
 
 if __name__ == "__main__":
     main()

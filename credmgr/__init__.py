@@ -19,7 +19,7 @@ credmgr/
     audit.py        Password health audit (weak/duplicate/reused/old/breached)
     clipboard.py    Clipboard copy with auto-clear
     ui.py           Terminal rendering helpers (rich)
-    cli.py          Argument parsing and command dispatch
+    cli.py          Typer-based argument parsing and command dispatch
 
 Extending credmgr
 -----------------
@@ -30,7 +30,7 @@ Extending credmgr
 - New vault version:   bump vault.CURRENT_VERSION and add an entry to
                        vault.MIGRATIONS.
 - New audit check:     add a function to audit.py and wire it into run_audit().
-- New command:         add a cmd_* function and a subparser in cli.py.
+- New command:         add a cmd_* function and an @app.command() in cli.py.
 """
 
-__version__ = "3.0.0"
+__version__ = "3.1.0"

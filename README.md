@@ -2,7 +2,7 @@
 
 A CLI password manager that stores all credentials in a single, envelope-encrypted vault file on your own machine — no cloud sync, server, or telemetry.
 
-- **Version:** 3.0.0 
+- **Version:** 3.1.0 
 - **License:** MIT
 - **Requires:** Python ≥ 3.10
 
@@ -325,6 +325,7 @@ Equivalently: `pip install PyNaCl>=1.5` / `pycryptodome>=3.20` / `cryptography>=
 | `argon2-cffi` | Argon2id key derivation | Always |
 | `rich` | Terminal formatting/tables | Always |
 | `pyperclip` | Clipboard copy support | Always |
+| `typer` | CLI argument parsing and command dispatch | Always |
 | `cryptography` | `aesgcm-cryptography` backend | Optional (`credmgr[cryptography]`) |
 | `PyNaCl` | `xchacha-pynacl` backend | Optional (`credmgr[pynacl]`) |
 | `pycryptodome` | `aesgcm-pycryptodome` backend | Optional (`credmgr[pycryptodome]`) |
@@ -460,7 +461,7 @@ credential-manager/
 └── credmgr/
     ├── __init__.py           # Package docstring / version
     ├── __main__.py           # `python -m credmgr` entry point
-    ├── cli.py                # Argument parsing and command dispatch
+    ├── cli.py                # Typer-based argument parsing and command dispatch
     ├── models.py              # Account / Credentials / PasswordHistoryEntry
     ├── config.py              # Runtime configuration
     ├── vault.py                # Versioned, encrypted vault file I/O + migrations
@@ -483,7 +484,7 @@ credential-manager/
     └── ui.py                   # Terminal rendering (rich)
 ```
 
-**Extension points:** new crypto backend → file in `crypto/plugins/` (see above); new vault version → bump `vault.CURRENT_VERSION` + entry in `vault.MIGRATIONS`; new audit check → `find_*` function in `audit.py`, wired into `run_audit()`; new CLI command → `cmd_*` function + subparser in `cli.py`.
+**Extension points:** new crypto backend → file in `crypto/plugins/` (see above); new vault version → bump `vault.CURRENT_VERSION` + entry in `vault.MIGRATIONS`; new audit check → `find_*` function in `audit.py`, wired into `run_audit()`; new CLI command → `cmd_*` function + `@app.command()` in `cli.py` (or `@config_app.command()` for a `config` subcommand).
 
 ---
 
