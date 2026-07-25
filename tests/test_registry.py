@@ -69,10 +69,17 @@ def test_broken_plugin_module_does_not_crash_discovery(monkeypatch, tmp_path):
     names = registry_mod.all_backends()
     assert "aesgcm-cryptography" in names
 
-def test_default_backend_prefers_cryptography_when_available():
-    if "aesgcm-cryptography" in registry_mod.available_backends():
-        assert registry_mod.default_backend() == "aesgcm-cryptography"
+def test_default_backend_uses_preference_order():
+    available = registry_mod.available_backends()
 
+    for backend in registry_mod._PREFERENCE_ORDER:
+        if backend in available:
+            assert registry_mod.default_backend() == backend
+            return
+
+    with pytest.raises(BackendUnavailableError):
+        registry_mod.default_backend()
+                
 def test_default_backend_raises_when_nothing_is_available(monkeypatch):
     monkeypatch.setattr(registry_mod, "available_backends", lambda: [])
     with pytest.raises(BackendUnavailableError):
