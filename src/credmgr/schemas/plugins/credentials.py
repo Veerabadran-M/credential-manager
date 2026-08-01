@@ -93,6 +93,15 @@ class CredentialsSchema(Schema):
             for acc in accounts:
                 console.print(f"  - {acc.userid}", style="white")
 
+    def cmd_list_all(self, document: Credentials, config) -> None:
+        if not document.services:
+            console.print("No services stored.", style="bold yellow")
+            return
+        for service, accounts in document.services.items():
+            console.print(service, style="bold magenta")
+            for acc in accounts:
+                console.print(f"  - {acc.userid}", style="white")
+
     def cmd_get(self, document: Credentials, args, config) -> None:
         if not args or len(args) > 2:
             raise SchemaError("Usage: credmgr get <service> [userid]")

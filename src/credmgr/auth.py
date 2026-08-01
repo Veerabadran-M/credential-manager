@@ -21,11 +21,13 @@ from .vault import AuthenticationError, Vault
 def get_session_id() -> int:
     return os.getsid(0)
 
-def session_cache_paths():
-    # Scoped by active vault name too: each vault has its own DEK, so a
-    # cached key from one vault must never be reused for another after
-    # `vault use` switches the active one.
-    key_path = config.session_cache_dir / f".credmgr_{get_session_id()}_{config.active_vault}"
+def session_cache_paths(vault_name: str | None = None):
+    # Scoped by vault name too: each vault has its own DEK, so a cached
+    # key from one vault must never be reused for another. Defaults to
+    # the active vault, but an explicit name lets callers (e.g. `list-all`,
+    # which walks every vault) cache/reuse a DEK for a non-active vault too.
+    name = vault_name if vault_name is not None else config.active_vault
+    key_path = config.session_cache_dir / f".credmgr_{get_session_id()}_{name}"
     meta_path = key_path.parent / f"{key_path.name}.meta"
     return key_path, meta_path
 
@@ -63,8 +65,8 @@ def deploy_cache_cleaner(key_file, meta_file, sid, created_time) -> None:
         finally:
             os._exit(0)
 
-def load_cached_dek():
-    key_path, meta_path = session_cache_paths()
+def load_cached_dek(vault_name: str | None = None):
+    key_path, meta_path = session_cache_paths(vault_name)
     if not key_path.exists() or not meta_path.exists():
         return None
 
@@ -78,8 +80,8 @@ def load_cached_dek():
 
     return None
 
-def cache_session(dek: bytes) -> None:
-    key_path, meta_path = session_cache_paths()
+def cache_session(dek: bytes, vault_name: str | None = None) -> None:
+    key_path, meta_path = session_cache_paths(vault_name)
 
     key_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 
@@ -99,14 +101,16 @@ def cache_session(dek: bytes) -> None:
 
     deploy_cache_cleaner(key_path, meta_path, sid, created_time)
 
-def authenticate(fresh: bool = False):
+def authenticate(fresh: bool = False, vault_name: str | None = None, prompt: str = "Master password: "):
     """Returns (dek, document, vault). Uses the session cache unless
-    `fresh`. `vault.schema_name` tells the caller which schema parsed
-    `document` -- see credmgr/schemas/."""
-    vault = Vault(config)
+    `fresh`. Defaults to the active vault; pass `vault_name` to
+    authenticate against a specific named vault instead (e.g. when
+    `list-all` walks every vault on disk). `vault.schema_name` tells the
+    caller which schema parsed `document` -- see credmgr/schemas/."""
+    vault = Vault(config, name=vault_name)
 
     if not fresh:
-        cached_dek = load_cached_dek()
+        cached_dek = load_cached_dek(vault_name)
         if cached_dek is not None:
             try:
                 document = vault.unlock_with_dek(cached_dek)
@@ -116,13 +120,13 @@ def authenticate(fresh: bool = False):
             except BackendUnavailableError as e:
                 fatal(str(e))
 
-    entered = safe_getpass("Master password: ")
+    entered = safe_getpass(prompt)
     try:
         dek, document = vault.unlock(entered)
     except (AuthenticationError, BackendUnavailableError) as e:
         fatal(str(e))
 
     if not fresh:
-        cache_session(dek)
+        cache_session(dek, vault_name)
 
     return dek, document, vault

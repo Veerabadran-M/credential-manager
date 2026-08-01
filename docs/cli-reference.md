@@ -69,7 +69,8 @@ details.
 
 | Command | Description |
 |---|---|
-| `credmgr list` | List all stored entries |
+| `credmgr list` | List all stored entries in the *active* vault |
+| `credmgr list-all` | List every service and userid under it *(credentials schema)*, or every key/LHS *(env schema)* — across **every vault on disk**, not just the active one. Prompts for each vault's master password in turn (`*` marks the active vault, same as `vault list`) |
 | `credmgr get <service> [userid]` | Display credentials in a table |
 | `credmgr search <query>` | Fuzzy search across entries |
 | `credmgr copy <service> [userid]` | Copy a value to the clipboard (auto-clears) |
@@ -89,6 +90,11 @@ Service/userid lookups (`get`, `copy`, `update`, `delete`, `history`) use
 progressively looser matching in the `credentials` schema: exact →
 case-insensitive substring → fuzzy (`difflib`, threshold configurable via
 `fuzzy_threshold`). Ambiguous matches list candidates instead of guessing.
+
+`list-all` is the one exception to "operates on the active vault only":
+it walks every vault returned by `credmgr vault list`, unlocking each in
+turn (its own master password, its own schema) before printing that
+vault's listing.
 
 ## Common flags
 

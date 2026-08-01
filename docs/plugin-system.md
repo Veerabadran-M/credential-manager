@@ -185,6 +185,7 @@ class Schema(ABC):
     # CRUD, dispatched generically by cli.py. Each has a default that
     # raises SchemaError; override only what your schema supports.
     def cmd_list(self, document, args, config): ...
+    def cmd_list_all(self, document, config): ...
     def cmd_get(self, document, args, config): ...
     def cmd_add(self, document, args, opts, config) -> bool: ...
     def cmd_update(self, document, args, opts, config) -> bool: ...
@@ -205,12 +206,23 @@ persisted, `False`/`None` otherwise. A schema that doesn't support an
 operation simply doesn't override it — the default raises `SchemaError`,
 which `cli.py` reports as a clean error message instead of a traceback.
 
+`cmd_list_all` is the one method not called once per invocation: the
+`credmgr list-all` command authenticates against *every* vault on disk
+(see `vaultmgr.list_vault_names`) and calls `cmd_list_all(document,
+config)` once per vault, against whichever schema that vault happens to
+use, printing a header line between vaults. Everything else in `cli.py`
+operates on the single active vault.
+
 ### Bundled schemas
 
 | Schema | Document | Supports |
 |---|---|---|
 | `credentials` (default) | `Credentials` — a `service → [Account, ...]` tree, each `Account` carrying userid/password/notes/history | All commands, including `audit` and `history` |
-| `env` | `EnvDocument` — an ordered list of `(key, value)` pairs | `list`, `get`, `search`, `copy`, `add`, `update`, `delete`, `import`, `export` (no `audit`/`history`) |
+| `env` | `EnvDocument` — an ordered list of `(key, value)` pairs | `list`, `list-all`, `get`, `search`, `copy`, `add`, `update`, `delete`, `import`, `export` (no `audit`/`history`) |
+
+`list-all` prints a bare, unfiltered per-vault listing shaped by the
+schema: every service with every userid under it (`credentials`), or
+every key/LHS (`env`) — no counts, no truncation, just the identifiers.
 
 The `env` schema's on-disk plaintext (before encryption) is a flat
 `KEY=VALUE`-per-line text file — blank lines and `#`-prefixed lines are

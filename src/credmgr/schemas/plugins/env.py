@@ -127,6 +127,13 @@ class EnvSchema(Schema):
         for key, _value in document.entries:
             console.print(f"  - {key}", style="white")
 
+    def cmd_list_all(self, document: EnvDocument, config) -> None:
+        if not document.entries:
+            console.print("No entries stored.", style="bold yellow")
+            return
+        for key, _value in document.entries:
+            console.print(key, style="white")
+
     def cmd_get(self, document: EnvDocument, args, config) -> None:
         if not args:
             if not document.entries:

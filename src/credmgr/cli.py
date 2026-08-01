@@ -522,6 +522,32 @@ def list_cmd() -> None:
     _, document, _, schema = _load_authenticated()
     _dispatch(schema.cmd_list, document, [], config)
 
+def cmd_list_all() -> None:
+    """Walk every vault on disk (not just the active one), authenticating
+    against each in turn, and print its schema-shaped listing: every
+    service + userid under it (credentials), or every key/LHS (env)."""
+    names = vaultmgr.list_vault_names(config)
+    if not names:
+        console.print("No vaults found. Run 'credmgr vault create <name>' to make one.", style="bold yellow")
+        return
+
+    from .auth import authenticate  # local import: avoids a circular import at load time
+
+    for i, name in enumerate(names):
+        if i:
+            console.print()
+        schema_name = vaultmgr.peek_schema(config, name)
+        marker = "*" if name == config.active_vault else " "
+        console.print(f"{marker} [bold cyan]{name}[/bold cyan] ({schema_name})")
+
+        _, document, vault = authenticate(vault_name=name, prompt=f"Master password for vault '{name}': ")
+        schema = get_schema(vault.schema_name)
+        _dispatch(schema.cmd_list_all, document, config)
+
+@app.command(name="list-all", help="List services/userids (credentials) or keys (env) across every vault, not just the active one")
+def list_all_cmd() -> None:
+    cmd_list_all()
+
 @app.command(name="audit", help="Run a password health audit (credentials schema only)")
 def audit_cmd() -> None:
     _, document, _, schema = _load_authenticated()

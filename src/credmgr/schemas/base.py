@@ -46,6 +46,14 @@ class Schema(ABC):
     def cmd_list(self, document, args: list, config) -> None:
         raise SchemaError(f"'list' is not supported by the '{self.name}' schema.")
 
+    def cmd_list_all(self, document, config) -> None:
+        """Print a bare, unfiltered listing of every entry in *this*
+        document, schema-shaped: every service with every userid under it
+        (credentials), or every key/LHS (env). No counts, no truncation --
+        just the identifiers. Called once per vault by the `list-all` CLI
+        command, which is the part that walks every vault on disk."""
+        raise SchemaError(f"'list-all' is not supported by the '{self.name}' schema.")
+
     def cmd_get(self, document, args: list, config) -> None:
         raise SchemaError(f"'get' is not supported by the '{self.name}' schema.")
 
