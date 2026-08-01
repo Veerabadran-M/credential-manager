@@ -140,7 +140,7 @@ def test_v1_vault_is_migrated_to_v2_on_read(config):
         "vault": {"nonce": _b64e(nonce2), "ciphertext": _b64e(vault_ct)},
     }
 
-    config.master_dir.mkdir(parents=True, exist_ok=True)
+    config.vault_file.parent.mkdir(parents=True, exist_ok=True)
     config.vault_file.write_text(json.dumps(raw_v1))
 
     vault = Vault(config)
