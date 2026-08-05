@@ -400,34 +400,33 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
     epilog="""\
-Examples:\n
-credmgr init\n
-credmgr fetch-data\n
-credmgr add netflix alice\n
-credmgr add netflix alice --generate\n
-credmgr add netflix alice --generate --passphrase\n
-credmgr add netflix alice --notes "backup email is alice@x.com"\n
-credmgr generate\n
-credmgr copy netflix\n
-credmgr get netflix alice\n
-credmgr search netflix\n
-credmgr update netflix alice password --generate\n
-credmgr update netflix alice notes "backup email is alice@x.com"\n
-credmgr history netflix alice\n
-credmgr audit\n
-credmgr config show\n
-credmgr config set password_max_age_days 60\n
-credmgr passwd\n
-credmgr delete netflix alice\n
-credmgr export\n
-credmgr migrate --backend aesgcm-cryptography\n
-credmgr vault create work --schema credentials\n
-credmgr vault create employee --schema env\n
-credmgr vault list\n
-credmgr vault use work\n
-credmgr add EMPLOYEE_ID 123456\n
-credmgr global github\n
-"""
+Examples:
+credmgr init
+credmgr fetch-data
+credmgr add netflix alice
+credmgr add netflix alice --generate
+credmgr add netflix alice --generate --passphrase
+credmgr add netflix alice --notes "backup email is alice@x.com"
+credmgr generate
+credmgr copy netflix
+credmgr get netflix alice
+credmgr search netflix
+credmgr update netflix alice password --generate
+credmgr update netflix alice notes "backup email is alice@x.com"
+credmgr history netflix alice
+credmgr audit
+credmgr config show
+credmgr config set password_max_age_days 60
+credmgr passwd
+credmgr delete netflix alice
+credmgr export
+credmgr migrate --backend aesgcm-cryptography
+credmgr vault create work --schema credentials
+credmgr vault create employee --schema env
+credmgr vault list
+credmgr vault use work
+credmgr add EMPLOYEE_ID 123456
+credmgr global github"""
 )
 
 config_app = typer.Typer(help="View or edit configuration", no_args_is_help=False)
