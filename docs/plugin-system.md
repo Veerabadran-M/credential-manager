@@ -196,6 +196,11 @@ class Schema(ABC):
     def cmd_audit(self, document, config): ...
     def cmd_import(self, document, filepath, config) -> bool: ...
     def cmd_export(self, document, config): ...
+
+    # Cross-vault search index for `credmgr global` (see globalindex.py).
+    # Default raises SchemaError, same as the cmd_* methods -- a schema
+    # that doesn't implement this just doesn't participate in `global`.
+    def index_entries(self, document) -> list[IndexEntry]: ...
 ```
 
 `cli.py` collects raw CLI arguments and shared option flags
@@ -213,12 +218,49 @@ config)` once per vault, against whichever schema that vault happens to
 use, printing a header line between vaults. Everything else in `cli.py`
 operates on the single active vault.
 
+### `index_entries` and the `global` command
+
+`credmgr global <query>` (see [cli-reference.md](cli-reference.md)) is
+schema-agnostic in the same way: it never branches on which schema a
+vault uses. What makes that possible is `index_entries`, and one small
+data class, both in `schemas/base.py`:
+
+```python
+@dataclass
+class IndexEntry:
+    fields: dict[str, str]        # matched case-insensitively/partially by `global`
+    summary: list[tuple[str, str]]  # ordered (label, value) shown once a search narrows to this entry
+    args: list[str]               # resolves this entry via this schema's own cmd_get, post-unlock
+```
+
+`index_entries(self, document) -> list[IndexEntry]` returns one
+`IndexEntry` per searchable item in a document. `credmgr/globalindex.py`
+calls it right after any command saves a vault, and stores the result
+(vault name, schema name, and the raw `fields`/`summary`/`args`) in
+`~/.credmgr/index.json` — plaintext, but containing only identifiers,
+never secrets. `credentials` indexes one entry per `(service, userid)`
+pair; `env` indexes one entry per key. Neither schema needs to know
+`global` exists beyond implementing this one method — `globalindex.py`
+and `cli.py`'s `global` command never import or special-case either
+plugin.
+
+Once a search narrows down to one entry and the user picks it,
+`cli.py` unlocks *only* that entry's vault and calls
+`schema.cmd_get(document, entry.args, config)` — the same `cmd_get`
+every schema already implements for the plain `get` command. That's the
+whole "resolve a selected entry after unlock" step: no new dispatch
+path, no schema-specific branching in `global` itself.
+
+A schema that doesn't override `index_entries` (the default raises
+`SchemaError`) simply never contributes entries to the index — its
+vaults are silently skipped by `global`, not crashed on.
+
 ### Bundled schemas
 
 | Schema | Document | Supports |
 |---|---|---|
-| `credentials` (default) | `Credentials` — a `service → [Account, ...]` tree, each `Account` carrying userid/password/notes/history | All commands, including `audit` and `history` |
-| `env` | `EnvDocument` — an ordered list of `(key, value)` pairs | `list`, `list-all`, `get`, `search`, `copy`, `add`, `update`, `delete`, `import`, `export` (no `audit`/`history`) |
+| `credentials` (default) | `Credentials` — a `service → [Account, ...]` tree, each `Account` carrying userid/password/notes/history | All commands, including `audit` and `history`; indexed for `global` by `(service, userid)` |
+| `env` | `EnvDocument` — an ordered list of `(key, value)` pairs | `list`, `list-all`, `get`, `search`, `copy`, `add`, `update`, `delete`, `import`, `export` (no `audit`/`history`); indexed for `global` by `key` |
 
 `list-all` prints a bare, unfiltered per-vault listing shaped by the
 schema: every service with every userid under it (`credentials`), or

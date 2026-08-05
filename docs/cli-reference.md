@@ -96,6 +96,37 @@ it walks every vault returned by `credmgr vault list`, unlocking each in
 turn (its own master password, its own schema) before printing that
 vault's listing.
 
+## Cross-vault search (`global`)
+
+| Command | Description |
+|---|---|
+| `credmgr global <query>` | Search a metadata index across **every vault** for `query`, without switching or decrypting the active vault. Once you pick a result, it prompts for that one vault's password and displays the entry. |
+
+```bash
+credmgr global github
+credmgr global OPENAI_API_KEY
+```
+
+Unlike every other entry command, `global` never touches the active
+vault. It searches `~/.credmgr/index.json` — a plaintext catalogue of
+searchable identifiers only (service names, userids, env keys — never
+passwords or keys) that every mutating command (`add`/`update`/`delete`/
+`import`/`vault create`/`vault delete`) keeps in sync automatically. If
+a vault's contents changed without the index knowing (a fresh install,
+a hand-edited `vault.json`, ...), `global` detects that from file
+metadata alone and transparently re-indexes just that vault (prompting
+for its password) before searching — no vault is ever decrypted just to
+search it.
+
+- **No matches** → `No matching entries found.`
+- **One match** → shows vault/schema/summary and asks `View this secret? [Y/n]`.
+- **Multiple matches** → a numbered list (`vault  schema  <schema-specific summary>`) to pick from.
+
+Whichever way you get there, only the one vault behind your final
+selection is ever unlocked — see [plugin-system.md](plugin-system.md)
+for how a schema plugin contributes to and resolves entries in the
+index.
+
 ## Common flags
 
 | Flag | Applies to | Meaning |
@@ -133,4 +164,8 @@ credmgr vault use default
 credmgr passwd
 credmgr migrate --backend aesgcm-cryptography
 credmgr config set password_max_age_days 60
+
+# Find something without knowing (or switching to) its vault
+credmgr global github
+credmgr global OPENAI_API_KEY
 ```

@@ -17,11 +17,34 @@ True if the document changed and should be persisted.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Any
 
 class SchemaError(Exception):
     """Raised for both "unknown/invalid input" and "operation not
     supported by this schema" -- the CLI just prints the message."""
+
+@dataclass
+class IndexEntry:
+    """One searchable row contributed by a schema to the cross-vault
+    metadata index (see credmgr/globalindex.py and the `global` CLI
+    command). An IndexEntry must never carry a secret value -- only
+    identifiers.
+
+    fields:  name -> value, matched case-insensitively/partially by
+             `global <query>` against every field of every entry in
+             every vault.
+    summary: ordered (label, value) pairs shown to the user once a
+             search narrows down to this entry (e.g. [("Service",
+             "github"), ("User ID", "alice")]).
+    args:    the positional args that resolve this exact entry via this
+             schema's own `cmd_get(document, args, config)` once the
+             owning vault has been unlocked. This is what lets `global`
+             retrieve the secret without any schema-specific branching.
+    """
+    fields: dict[str, str]
+    summary: list[tuple[str, str]]
+    args: list[str] = field(default_factory=list)
 
 class Schema(ABC):
     name: str
@@ -83,3 +106,17 @@ class Schema(ABC):
 
     def cmd_export(self, document, config) -> None:
         raise SchemaError(f"'export' is not supported by the '{self.name}' schema.")
+
+    def index_entries(self, document) -> list[IndexEntry]:
+        """Return one IndexEntry per searchable item in *this* document,
+        for the cross-vault metadata index that powers `credmgr global`
+        (see credmgr/globalindex.py). Called once per vault, right after
+        any command that mutates and saves it, and during index rebuilds
+        -- never on every search, which is the whole point of the index.
+
+        Must return only identifiers (service names, userids, key
+        names, ...) -- never passwords, values, or other secrets. The
+        default raises SchemaError so a schema that doesn't implement
+        this simply doesn't participate in `global` search (its vaults
+        are skipped, not crashed on)."""
+        raise SchemaError(f"'global' indexing is not supported by the '{self.name}' schema.")

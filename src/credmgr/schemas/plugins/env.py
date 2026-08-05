@@ -13,7 +13,7 @@ import difflib
 from ...clipboard import copy_to_clipboard
 from ...ui import console
 from ...validation import validate_text
-from ..base import Schema, SchemaError
+from ..base import IndexEntry, Schema, SchemaError
 
 MAX_KEY_LENGTH = 256
 MAX_VALUE_LENGTH = 8192
@@ -251,3 +251,11 @@ class EnvSchema(Schema):
 
     def cmd_export(self, document: EnvDocument, config) -> None:
         print(EnvSchema.serialize(document).decode("utf-8"), end="")
+
+    # ---- global (cross-vault) search index ----
+
+    def index_entries(self, document: EnvDocument) -> list[IndexEntry]:
+        return [
+            IndexEntry(fields={"lhs": key}, summary=[("Key", key)], args=[key])
+            for key, _value in document.entries
+        ]

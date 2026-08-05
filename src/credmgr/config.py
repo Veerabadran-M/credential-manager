@@ -102,6 +102,15 @@ class Configuration:
         return self.master_dir / "config.json"
 
     @property
+    def index_file(self) -> Path:
+        """Cross-vault metadata search index for `credmgr global` (see
+        globalindex.py). Contains only searchable identifiers -- vault
+        names, schema names, and the fields each schema's IndexEntry
+        exposes -- never passwords, encrypted blobs, decrypted secrets,
+        or master keys."""
+        return self.master_dir / "index.json"
+
+    @property
     def data_dir(self) -> Path:
         """Local cache of fetched security datasets (wordlist, common
         passwords, keyboard-sequence patterns, breached-password hashes)."""

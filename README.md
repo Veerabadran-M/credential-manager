@@ -44,6 +44,7 @@ credmgr audit
 | **Encryption** | Pluggable backends — AES-256-GCM (`cryptography` or `pycryptodome`) and XChaCha20-Poly1305 (`PyNaCl`); keys derived via Argon2id |
 | **Content schemas** | Pluggable vault content — `credentials` (services/accounts/passwords/history) or `env` (flat `KEY=VALUE` entries) |
 | **Multi-vault** | Create, list, switch between, and delete independently encrypted vaults |
+| **Cross-vault search** | `credmgr global <query>` searches a metadata-only index across every vault at once, without switching or decrypting the active one, then unlocks only the vault you pick |
 | **Search** | Exact, substring, and fuzzy matching |
 | **Generation** | Cryptographically secure random passwords or Diceware-style passphrases |
 | **Clipboard** | Copy with automatic timed clearing |

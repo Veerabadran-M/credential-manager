@@ -14,6 +14,7 @@ from typing import List, Optional
 import typer
 
 from . import datasources
+from . import globalindex
 from . import vaultmgr
 from .config import (ARGON2_MAX_MEMORY_COST, ARGON2_MIN_MEMORY_COST, ARGON2_MIN_PARALLELISM,
                      ARGON2_MIN_TIME_COST, config)
@@ -49,6 +50,10 @@ def _save_if_mutated(vault: Vault, document, dek: bytes, mutated: bool) -> None:
             vault.save(document, dek)
         except VaultError as e:
             fatal(str(e))
+        # The document just saved is already decrypted in memory, so the
+        # cross-vault search index (credmgr/globalindex.py) can be kept
+        # in sync for free -- no extra unlock, no extra vault read.
+        globalindex.update_vault(config, vault.name, vault.schema_name, document)
 
 def _dispatch(fn, *args):
     """Call a schema cmd_* method, turning SchemaError into a clean CLI
@@ -174,6 +179,7 @@ def cmd_init(skip_data_fetch: bool = False, backend: str | None = None) -> None:
 
     console.print("Deriving key (this takes a moment)…", style="bold yellow")
     vault.create(backend, master, "credentials")
+    globalindex.update_vault(config, vault.name, "credentials", get_schema("credentials").new_document())
 
     console.print("Vault created and master password set.", style="bold green")
 
@@ -334,6 +340,7 @@ def cmd_vault_create(name: str, schema_name: str, backend: str | None) -> None:
         vault.create(backend, master, schema_name)
     except VaultError as e:
         fatal(str(e))
+    globalindex.update_vault(config, name, schema_name, get_schema(schema_name).new_document())
 
     console.print(f"Vault '{name}' created.", style="bold green")
 
@@ -381,6 +388,7 @@ def cmd_vault_delete(name: str) -> None:
         vaultmgr.delete_vault(config, name)
     except vaultmgr.VaultManagerError as e:
         fatal(str(e))
+    globalindex.remove_vault(config, name)
 
     console.print(f"Vault '{name}' deleted.", style="bold red")
 
@@ -417,7 +425,8 @@ credmgr vault create work --schema credentials\n
 credmgr vault create employee --schema env\n
 credmgr vault list\n
 credmgr vault use work\n
-credmgr add EMPLOYEE_ID 123456
+credmgr add EMPLOYEE_ID 123456\n
+credmgr global github\n
 """
 )
 
@@ -547,6 +556,99 @@ def cmd_list_all() -> None:
 @app.command(name="list-all", help="List services/userids (credentials) or keys (env) across every vault, not just the active one")
 def list_all_cmd() -> None:
     cmd_list_all()
+
+''' ------------------------------ COMMANDS: GLOBAL (CROSS-VAULT) SEARCH ------------------------------ '''
+
+def _ensure_index_fresh(names: list) -> None:
+    """Bring the metadata index up to date before a global search.
+
+    Prunes vaults that no longer exist, then re-derives metadata only
+    for vaults `globalindex.stale_vault_names` flags as out of sync
+    (missing from the index, changed on disk, or hand-edited). Vaults
+    that are already up to date are never touched or unlocked -- this is
+    what keeps `global` fast even with many vaults.
+    """
+    globalindex.prune_removed_vaults(config, names)
+    stale = globalindex.stale_vault_names(config, names)
+    if not stale:
+        return
+
+    from .auth import authenticate  # local import: avoids a circular import at load time
+
+    console.print("Refreshing the search index for out-of-date vaults…", style="dim")
+    for name in stale:
+        _, document, vault = authenticate(
+            vault_name=name,
+            prompt=f"Master password for vault '{name}' (index refresh): "
+        )
+        globalindex.update_vault(config, name, vault.schema_name, document)
+
+def _render_match_row(index: int, match: dict) -> str:
+    fields = "  ".join(value for _label, value in match["summary"])
+    return f"  {index}. {match['vault']:<12} {match['schema']:<12} {fields}"
+
+def _render_match_details(match: dict) -> None:
+    console.print(f"Vault    : [bold cyan]{match['vault']}[/bold cyan]")
+    console.print(f"Schema   : {match['schema']}")
+    for label, value in match["summary"]:
+        console.print(f"{label:<9}: {value}")
+
+def cmd_global(query: str) -> None:
+    """Search every vault's metadata index for `query` without unlocking
+    or switching any vault, then unlock only the single vault the user
+    selects to retrieve the actual secret. See globalindex.py."""
+    query = (query or "").strip()
+    if not query:
+        fatal("Usage: credmgr global <query>")
+
+    names = vaultmgr.list_vault_names(config)
+    if not names:
+        console.print("No vaults found. Run 'credmgr vault create <name>' to make one.", style="bold yellow")
+        return
+
+    _ensure_index_fresh(names)
+    matches = globalindex.search(config, query)
+
+    if not matches:
+        console.print("No matching entries found.", style="bold yellow")
+        return
+
+    if len(matches) == 1:
+        match = matches[0]
+        console.print("\nFound 1 match\n", style="bold cyan")
+        _render_match_details(match)
+        choice = ask_choice("\nView this secret?", ["y", "n"], "y")
+        if choice != "y":
+            return
+    else:
+        console.print(f"\n[bold cyan]Found {len(matches)} matches[/bold cyan]\n")
+        for i, m in enumerate(matches, start=1):
+            console.print(_render_match_row(i, m))
+        console.print()
+        try:
+            raw = input("Select an entry: ").strip()
+        except KeyboardInterrupt:
+            print()
+            return
+        if not raw.isdigit() or not (1 <= int(raw) <= len(matches)):
+            console.print("Invalid selection.", style="bold red")
+            return
+        match = matches[int(raw) - 1]
+
+    from .auth import authenticate  # local import: avoids a circular import at load time
+
+    # Only the selected vault is ever unlocked; the active vault (and
+    # every other vault) is left completely untouched.
+    _, document, vault = authenticate(
+        vault_name=match["vault"],
+        prompt=f"Password for vault \"{match['vault']}\": "
+    )
+    schema = get_schema(vault.schema_name)
+    _dispatch(schema.cmd_get, document, match["args"], config)
+
+@app.command(name="global", help="Search for an entry across every vault via the metadata index, then unlock only the matching vault")
+def global_cmd(query: str) -> None:
+    cmd_global(query)
 
 @app.command(name="audit", help="Run a password health audit (credentials schema only)")
 def audit_cmd() -> None:

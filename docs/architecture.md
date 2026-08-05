@@ -45,6 +45,7 @@ credential-manager/
         ├── datasources.py               # Downloads optional security datasets
         ├── search.py                     # Fuzzy + global search (credentials schema)
         ├── audit.py                       # Password health audit (credentials schema)
+        ├── globalindex.py                  # Cross-vault metadata search index (`credmgr global`)
         ├── clipboard.py                    # Clipboard copy with auto-clear
         ├── ui.py                            # Terminal rendering helpers (rich)
         ├── validation.py                     # Shared text-input validation
@@ -86,6 +87,7 @@ credential-manager/
 | `generator.py` | Cryptographically secure random password and Diceware-style passphrase generation. |
 | `search.py` | Exact → substring → fuzzy matching across services, userids, and notes, for the `credentials` schema. |
 | `audit.py` | Detects weak, duplicate, reused, stale, and breached passwords, for the `credentials` schema. |
+| `globalindex.py` | Owns `~/.credmgr/index.json`, the metadata-only search catalogue behind `credmgr global`: derives entries from an already-decrypted document (via a schema's `index_entries`), tracks per-vault staleness from file metadata, and answers cross-vault searches. Never decrypts a vault itself. |
 | `clipboard.py` | Copies a value to the clipboard and clears it after a timeout, in a forked background process. |
 | `ui.py` | Terminal rendering (tables, prompts, colored output) built on `rich`. |
 | `validation.py` | Shared single-line/multiline text validation used by schema plugins. |
@@ -126,6 +128,7 @@ graph TD
     CLI --> VaultMgr[vaultmgr.py]
     CLI --> Datasources[datasources.py]
     CLI --> Generator[generator.py]
+    CLI --> GlobalIndex[globalindex.py]
     Auth --> Vault[vault.py]
     Vault --> CryptoRegistry[crypto/registry.py]
     Vault --> SchemaRegistry[schemas/registry.py]
@@ -141,6 +144,8 @@ graph TD
     Audit --> Datasources
     Vault --> Envelope[crypto/envelope.py]
     Envelope --> CryptoRegistry
+    GlobalIndex --> SchemaRegistry
+    GlobalIndex --> VaultMgr
 ```
 
 Arrows point from "depends on" to "depended upon." Note that neither
@@ -148,6 +153,33 @@ Arrows point from "depends on" to "depended upon." Note that neither
 specific schema plugin — both are reached only through their registries.
 This is what makes new backends and schemas purely additive (see
 [plugin-system.md](plugin-system.md)).
+
+## Cross-vault search (`global`) data flow
+
+`credmgr global <query>` never decrypts every vault to search it — it
+searches `globalindex.py`'s on-disk catalogue of metadata, which every
+mutating command keeps current as a side effect of the flow above (once
+`vault.save()` succeeds, `cli.py` hands the same in-memory document to
+`globalindex.update_vault()` — no extra unlock, no extra vault read):
+
+```mermaid
+flowchart LR
+    A[User types<br/>credmgr global QUERY] --> B["globalindex.py<br/>stale_vault_names()"]
+    B -->|stale vaults, if any| C["auth.py<br/>authenticate(vault_name)"]
+    C --> D["globalindex.py<br/>update_vault()"]
+    D --> E["globalindex.py<br/>search()"]
+    B -->|nothing stale| E
+    E --> F[User picks a match]
+    F --> G["auth.py<br/>authenticate(vault_name=match.vault)"]
+    G --> H["schema plugin<br/>cmd_get(document, match.args, config)"]
+    H --> I[Secret displayed]
+```
+
+Only the vault behind the final selection (step G) is ever unlocked to
+retrieve a secret; any unlocks in step C are solely to bring a stale
+vault's metadata back in sync, and happen before the user has even seen
+a list of matches. The active vault named in `config.active_vault` is
+never read from or written to by any of this.
 
 ## Encryption workflow (summary)
 

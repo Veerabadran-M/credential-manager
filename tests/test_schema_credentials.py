@@ -321,3 +321,45 @@ def test_cmd_audit_runs_without_error(schema, config, capsys):
     schema.cmd_audit(doc, config)
     out = capsys.readouterr().out
     assert "Password Audit" in out
+
+
+# ---- index_entries (credmgr global) ----
+
+def test_index_entries_empty_document_returns_empty_list(schema):
+    assert schema.index_entries(Credentials()) == []
+
+
+def test_index_entries_one_row_per_account(schema, config):
+    doc = Credentials()
+    schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
+    schema.cmd_add(doc, ["github", "bob"], GEN_OPTS, config)
+    schema.cmd_add(doc, ["gitlab", "alice"], GEN_OPTS, config)
+
+    entries = schema.index_entries(doc)
+    assert len(entries) == 3
+    fields = sorted((e.fields["service"], e.fields["userid"]) for e in entries)
+    assert fields == [("github", "alice"), ("github", "bob"), ("gitlab", "alice")]
+
+
+def test_index_entries_args_resolve_via_cmd_get(schema, config, capsys):
+    doc = Credentials()
+    schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
+    capsys.readouterr()
+
+    [entry] = schema.index_entries(doc)
+    assert entry.args == ["github", "alice"]
+    assert entry.summary == [("Service", "github"), ("User ID", "alice")]
+
+    # The whole point of `args`: cmd_get(doc, entry.args, config) must
+    # resolve to exactly the account this entry describes.
+    schema.cmd_get(doc, entry.args, config)
+    out = capsys.readouterr().out
+    assert "github" in out and "alice" in out
+
+
+def test_index_entries_never_include_password_field_name(schema, config):
+    doc = Credentials()
+    schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
+    [entry] = schema.index_entries(doc)
+    assert "password" not in entry.fields
+    assert not any("password" in label.lower() for label, _ in entry.summary)

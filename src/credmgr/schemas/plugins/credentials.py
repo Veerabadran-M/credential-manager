@@ -19,7 +19,7 @@ from ...search import (global_search, resolve_for_mutation, search_accounts,
                         search_services)
 from ...ui import console, prompt_new_password, render_get_results
 from ...validation import validate_text
-from ..base import Schema, SchemaError
+from ..base import IndexEntry, Schema, SchemaError
 
 MAX_LABEL_LENGTH = 128
 MAX_QUERY_LENGTH = 512
@@ -448,3 +448,16 @@ class CredentialsSchema(Schema):
 
     def cmd_export(self, document: Credentials, config) -> None:
         print(json.dumps(document.to_dict(), indent=4))
+
+    # ---- global (cross-vault) search index ----
+
+    def index_entries(self, document: Credentials) -> list[IndexEntry]:
+        entries = []
+        for service, accounts in document.services.items():
+            for acc in accounts:
+                entries.append(IndexEntry(
+                    fields={"service": service, "userid": acc.userid},
+                    summary=[("Service", service), ("User ID", acc.userid)],
+                    args=[service, acc.userid],
+                ))
+        return entries

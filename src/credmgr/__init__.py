@@ -4,4 +4,4 @@ Top-level package; holds only shared version metadata. For module
 responsibilities and extension points, see docs/architecture.md.
 """
 
-__version__ = "4.0.0"
+__version__ = "4.1.0"
