@@ -398,35 +398,7 @@ app = typer.Typer(
     name="credmgr",
     help="Secure Credential Manager CLI tool",
     no_args_is_help=True,
-    add_completion=False,
-    epilog="""\
-Examples:
-credmgr init
-credmgr fetch-data
-credmgr add netflix alice
-credmgr add netflix alice --generate
-credmgr add netflix alice --generate --passphrase
-credmgr add netflix alice --notes "backup email is alice@x.com"
-credmgr generate
-credmgr copy netflix
-credmgr get netflix alice
-credmgr search netflix
-credmgr update netflix alice password --generate
-credmgr update netflix alice notes "backup email is alice@x.com"
-credmgr history netflix alice
-credmgr audit
-credmgr config show
-credmgr config set password_max_age_days 60
-credmgr passwd
-credmgr delete netflix alice
-credmgr export
-credmgr migrate --backend aesgcm-cryptography
-credmgr vault create work --schema credentials
-credmgr vault create employee --schema env
-credmgr vault list
-credmgr vault use work
-credmgr add EMPLOYEE_ID 123456
-credmgr global github"""
+    add_completion=False
 )
 
 config_app = typer.Typer(help="View or edit configuration", no_args_is_help=False)
