@@ -40,19 +40,19 @@ no bug bounty program.
   HTTPS). Every other command is fully offline.
 - **Fail closed, fail loud.** Authentication failures, tampered vaults,
   and missing dependencies raise distinct, typed exceptions and clear
-  messages — never silently return corrupted or partial data.
-- **AEAD everywhere.** Every supported crypto backend is an Authenticated
-  Encryption with Associated Data construction, so tampering is always
-  detected on decrypt, not just encrypted-but-unauthenticated.
+  messages — never silently return corrupted or partial data. All
+  bundled crypto backends are AEAD (Authenticated Encryption with
+  Associated Data) constructions, so tampering is always detected on
+  decrypt rather than returning corrupted plaintext.
 - **Minimize what's re-encrypted.** Envelope encryption means rotating
   the master password never touches vault contents, and switching crypto
   backends never touches the KDF or the master password — each operation
   re-encrypts the smallest amount of data necessary. See
   [docs/crypto.md](docs/crypto.md).
-- **No plaintext at rest, and minimal plaintext in memory.** Decrypted
-  vault contents exist only in memory for the life of a single command
-  (or a short, RAM-backed session cache of the *key*, never the
-  password or plaintext contents).
+- **Secrets aren't stored as plaintext in vault files, and plaintext
+  exposure in memory is minimized.** Decrypted vault contents exist only
+  in memory for the life of a single command (or a short, RAM-backed
+  session cache of the *key*, never the password or plaintext contents).
 - **Follow established primitives, not custom cryptography.** Argon2id
   for key derivation and well-reviewed AEAD ciphers (AES-256-GCM,
   XChaCha20-Poly1305) via established libraries (`cryptography`,
@@ -97,8 +97,8 @@ files.
   unrecoverable by design.
 - **Shell history / terminal scrollback leakage of metadata.** Service
   names, userids, and keys typed as CLI arguments may be visible in shell
-  history or terminal buffers even though the vault file itself never
-  stores anything in plaintext.
+  history or terminal buffers even though secrets themselves are never
+  stored as plaintext in the vault file.
 - **Clipboard exposure.** A copied password remains on the system
   clipboard until `clipboard_timeout` elapses (default 30s) or another
   application checks/overwrites it.
@@ -107,8 +107,10 @@ files.
   `credmgr/schemas/plugins/`; it does not sandbox plugin code. Only
   install plugins you trust.
 - **Non-POSIX platforms.** Session caching and clipboard auto-clear rely
-  on `os.fork()`; native Windows is not supported (WSL is expected to
-  work, as it's POSIX-compatible).
+  on `os.fork()`; native Windows is not supported. Linux is the only
+  tested and supported platform. WSL is untested but expected to work,
+  since it provides a POSIX-compatible environment. macOS and other
+  BSD-derived systems are untested.
 - **The completeness of the offline breach database.** The bundled
   breach check uses a curated subset of known-breached passwords, not
   the full Have I Been Pwned corpus, and performs no online k-anonymity

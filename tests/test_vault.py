@@ -1,22 +1,17 @@
 """Vault-level tests: envelope encryption round trips, backend migration,
-legacy version migration, and consistent authentication-failure behavior
-regardless of which backend is in use.
+and consistent authentication-failure behavior regardless of which
+backend is in use.
 """
 
 from __future__ import annotations
 
-import base64
 import json
-import os
 
 import pytest
 
 from credmgr.crypto.registry import available_backends
 from credmgr.models import Account, Credentials
 from credmgr.vault import AuthenticationError, Vault, VaultError
-
-def _b64e(data: bytes) -> str:
-    return base64.b64encode(data).decode("ascii")
 
 BACKEND_NAMES = available_backends()
 
@@ -79,7 +74,7 @@ def test_migrate_backend_preserves_data(config):
 
     raw = json.loads(config.vault_file.read_text())
     assert raw["backend"] == target
-    assert raw["version"] == 2
+    assert raw["version"] == 1
 
     _, reloaded = vault.unlock("hunter2")
     assert reloaded.services["github"][0].userid == "bob"
@@ -108,50 +103,3 @@ def test_migrate_backend_to_same_backend_is_a_no_op(config):
 
     after = config.vault_file.read_text()
     assert before == after
-
-def test_v1_vault_is_migrated_to_v2_on_read(config):
-    """Hand-construct a pre-plugin-architecture (v1) vault on disk and
-    confirm it's transparently upgraded to the v2 layout, without needing
-    to touch the ciphertext bytes (a pure structural transform)."""
-    from argon2.low_level import Type, hash_secret_raw
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-    salt = os.urandom(16)
-    password = "legacy-password"
-    kek = hash_secret_raw(secret=password.encode(), salt=salt, time_cost=3, 
-                    memory_cost=65536, parallelism=2, hash_len=32, type=Type.ID)
-    dek = AESGCM.generate_key(bit_length=256)
-
-    nonce1 = os.urandom(12)
-    wrapped_key_ct = AESGCM(kek).encrypt(nonce1, dek, b"credmgr-dek")
-
-    vault_plaintext = json.dumps({}).encode("utf-8")
-    nonce2 = os.urandom(12)
-    vault_ct = AESGCM(dek).encrypt(nonce2, vault_plaintext, b"credmgr-vault")
-
-    raw_v1 = {
-        "version": 1,
-        "kdf": {
-            "algorithm": "argon2id", "time_cost": 3, "memory_cost": 65536,
-            "parallelism": 2, "hash_len": 32, "salt": _b64e(salt),
-        },
-        "cipher": "aes256gcm",
-        "encrypted_key": {"nonce": _b64e(nonce1), "ciphertext": _b64e(wrapped_key_ct)},
-        "vault": {"nonce": _b64e(nonce2), "ciphertext": _b64e(vault_ct)},
-    }
-
-    config.vault_file.parent.mkdir(parents=True, exist_ok=True)
-    config.vault_file.write_text(json.dumps(raw_v1))
-
-    vault = Vault(config)
-    dek_out, creds = vault.unlock(password)
-
-    assert creds.services == {}
-
-    # Persist once (e.g. via save()) and confirm the on-disk layout is v2.
-    vault.save(creds, dek_out)
-    raw_v2 = json.loads(config.vault_file.read_text())
-    assert raw_v2["version"] == 2
-    assert raw_v2["backend"] == "aesgcm-cryptography"
-    assert "cipher" not in raw_v2
-    assert "nonce" not in raw_v2["vault"]  # combined into a single ciphertext blob

@@ -27,14 +27,16 @@ credmgr audit
 - **Pluggable encryption.** The core never imports a crypto library
   directly — it talks to an abstract backend interface. Install only the
   dependency your chosen algorithm needs, and switch algorithms later
-  with `credmgr migrate`, with no downtime and no plaintext touching disk.
+  with `credmgr migrate`, which re-encrypts in place without writing
+  decrypted vault contents to disk.
 - **Pluggable content.** Vaults aren't limited to one shape. The bundled
   `credentials` schema stores service/account logins with history;
   the `env` schema stores flat `KEY=VALUE` secrets. Multiple named
   vaults, each with its own schema and backend, can coexist.
 - **No black boxes.** Wrong password and tampered file are handled by
-  the same AEAD authentication check and produce the same clear error —
-  never corrupted data returned silently.
+  the same authentication check every bundled encryption backend
+  performs (all are AEAD constructions) and produce the same clear
+  error — never corrupted data returned silently.
 
 ## Key features
 
@@ -50,7 +52,7 @@ credmgr audit
 | **Clipboard** | Copy with automatic timed clearing |
 | **Audit** | Detects weak, duplicate, reused, stale, and breached passwords (`credentials` schema) |
 | **Session cache** | Optional short-lived, RAM-backed key cache to avoid re-typing the master password |
-| **Backend & password rotation** | `credmgr migrate` re-encrypts under a new backend; `credmgr passwd` rotates the master password — neither ever writes plaintext to disk |
+| **Backend & password rotation** | `credmgr migrate` re-encrypts under a new backend; `credmgr passwd` rotates the master password — neither intentionally writes decrypted vault contents to disk |
 
 See the full [command reference](docs/cli-reference.md) for everything
 `credmgr` can do.
@@ -81,9 +83,10 @@ pip install credmgr[cryptography]     # AES-256-GCM via cryptography
 pip install credmgr[all]              # every bundled backend
 ```
 
-`credmgr`'s core has no crypto dependency at all — commands that need one
-only ever offer installed backends, and requesting an uninstalled one
-produces an actionable `pip install credmgr[...]` message.
+`credmgr`'s core has no *backend-specific* AEAD dependency at all —
+commands that need one only ever offer installed backends, and
+requesting an uninstalled one produces an actionable `pip install
+credmgr[...]` message.
 
 > **Termux (Android):** `PyNaCl` doesn't ship a prebuilt wheel for Termux,
 > so pip tries to build `libsodium` from source, which fails on many
@@ -127,7 +130,7 @@ the wrapped key is re-encrypted):
 credmgr passwd
 ```
 
-**Switch crypto backends** without ever writing plaintext to disk:
+**Switch crypto backends** — re-encrypts in place, without intentionally writing decrypted vault contents to disk:
 
 ```bash
 credmgr migrate --backend aesgcm-cryptography
@@ -156,21 +159,25 @@ For the full command list, flags, and matching behavior, see the
 
 ## Architecture summary
 
-`credmgr` is organized around two independent plugin systems layered
-over a small, versioned vault file:
+`credmgr` is split into an application layer (`credmgr/core/`) that holds
+all the application logic behind a plain Python API, and a thin Typer
+frontend (`credmgr/cli/`) that only parses arguments and renders results
+— so a future REPL/TUI/GUI/REST frontend could reuse that layer without
+duplicating any of it. It's built around two independent plugin systems
+layered over a small vault file:
 
 - **`credmgr/crypto/`** — an abstract `EncryptionBackend` interface,
   discovered and looked up through a registry, so the application core
   never imports a crypto library directly.
 - **`credmgr/schemas/`** — an abstract `Schema` interface that owns the
   *shape* of a vault's contents (`credentials`, `env`, or a custom
-  schema you add), so `vault.py` and `cli.py` stay generic.
-- **`credmgr/vault.py`** — versioned, envelope-encrypted file I/O that
-  depends on both interfaces by name, never by import.
+  schema you add), so `vault.py` and `core/manager.py` stay generic.
+- **`credmgr/vault.py`** — envelope-encrypted file I/O (Vault Format v1)
+  that depends on both interfaces by name, never by import.
 
 ```mermaid
 flowchart LR
-    CLI[cli.py] --> Vault[vault.py]
+    CLI[cli/commands.py] --> Core[core/manager.py] --> Vault[vault.py]
     Vault --> CryptoRegistry[crypto/registry.py] --> CryptoPlugins[crypto/plugins/*]
     Vault --> SchemaRegistry[schemas/registry.py] --> SchemaPlugins[schemas/plugins/*]
 ```
@@ -188,7 +195,7 @@ in [docs/architecture.md](docs/architecture.md).
 | [docs/plugin-system.md](docs/plugin-system.md) | Crypto and schema plugin interfaces, discovery mechanism, how to write a new plugin |
 | [docs/cli-reference.md](docs/cli-reference.md) | Full command reference, flags, and examples |
 | [docs/development.md](docs/development.md) | Dev environment setup, running tests, code style, extension points |
-| [docs/migration.md](docs/migration.md) | Vault-version, legacy-layout, and crypto-backend migrations |
+| [docs/migration.md](docs/migration.md) | Vault format version and crypto-backend migrations |
 
 Also see [SECURITY.md](SECURITY.md) for the threat model and
 vulnerability disclosure process.
@@ -196,8 +203,9 @@ vulnerability disclosure process.
 ## Limitations & threat model (short version)
 
 Single-user, single-machine, no sync or sharing, no 2FA/MFA storage, no
-backdoor or password recovery by design, POSIX-only. Full detail in
-[SECURITY.md](SECURITY.md).
+backdoor or password recovery by design. Linux is the supported
+platform; native Windows isn't supported, and WSL/macOS/BSD are
+untested. Full detail in [SECURITY.md](SECURITY.md).
 
 ## Contributing
 

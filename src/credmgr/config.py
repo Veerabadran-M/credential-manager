@@ -284,12 +284,6 @@ class Configuration:
 
 try:
     config = Configuration().load()
-
-    # One-time upgrade of a pre-multi-vault install (~/.credmgr/vault.json)
-    # into the ~/.credmgr/vaults/default/ layout. No-op once migrated, and
-    # no-op if there's no legacy vault to migrate in the first place.
-    from .vaultmgr import migrate_legacy_layout
-    migrate_legacy_layout(config)
 except ValueError as e:
     print(f"credmgr: {e}", file=sys.stderr)
     raise SystemExit(1) from e

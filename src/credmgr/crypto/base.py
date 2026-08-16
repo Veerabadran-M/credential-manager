@@ -1,6 +1,6 @@
 """Abstract encryption backend interface.
 
-The only contract the rest of the application (vault.py, cli.py, ...) is
+The only contract the rest of the application (vault.py, core/manager.py, ...) is
 allowed to depend on: nothing outside credmgr/crypto/plugins/ should
 import cryptography, PyNaCl, or PyCryptodome directly. To add a backend,
 subclass EncryptionBackend and drop the file in crypto/plugins/ -- the

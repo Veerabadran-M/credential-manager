@@ -10,13 +10,19 @@ architectural background, start with [architecture.md](architecture.md).
 git clone https://github.com/Veerabadran-M/credential-manager.git
 cd credential-manager
 python -m venv .venv
-source .venv/bin/activate      # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 
 pip install -e .[all]           # editable install with every crypto backend
 pip install pytest
 ```
 
-`credmgr`'s core has no crypto dependency of its own — installing `[all]`
+`credmgr` is developed and tested on Linux. Native Windows is not
+supported (the codebase relies on POSIX-only facilities such as
+`os.chmod` permission bits and `/dev/shm`); running under WSL is
+untested but expected to work, since it provides a POSIX-compatible
+environment. macOS and other BSD-derived systems are untested.
+
+`credmgr`'s core has no *backend-specific* AEAD dependency of its own — installing `[all]`
 pulls in `cryptography`, `PyNaCl`, and `pycryptodome` so every backend's
 tests can run locally. See [Installation](../README.md#installation) if
 you only need one backend.
@@ -29,11 +35,11 @@ python credmgr.py --help        # or, without installing
 python -m credmgr --help        # equivalent
 ```
 
-Point `CREDMGR_HOME` at a scratch directory if you don't want to touch
-your real `~/.credmgr` while developing (there's no dedicated env var for
-this today — the simplest approach is to temporarily set `HOME` to a
-throwaway directory, or use the `tmp_path`-based fixtures the test suite
-already relies on).
+There's no dedicated environment variable for pointing `credmgr` at a
+scratch directory. If you don't want to touch your real `~/.credmgr`
+while developing, the simplest approach is to temporarily set `HOME` to
+a throwaway directory, or use the `tmp_path`-based fixtures the test
+suite already relies on.
 
 ## Running tests
 
@@ -45,7 +51,7 @@ pytest tests/ -v
 |---|---|
 | `test_backend_contract.py` | Every installed crypto backend, parametrized: round-trip encrypt/decrypt (with/without AAD), tamper/wrong-key/AAD-mismatch rejection — all raising the same `DecryptionError` |
 | `test_registry.py` | Crypto plugin discovery, unknown/unavailable backend handling, broken-plugin resilience, and CLI/env/config/default selection priority |
-| `test_vault.py` | Create/unlock/save round trips per backend, wrong-password handling, `migrate_backend()` correctness, and legacy `v1 → v2` vault migration |
+| `test_vault.py` | Create/unlock/save round trips per backend, wrong-password handling, and `migrate_backend()` correctness |
 
 Backend-parametrized tests are built from `available_backends()`, not a
 hardcoded list — a new plugin's tests run automatically once its file
@@ -87,9 +93,9 @@ file by file.
 |---|---|
 | New crypto backend | Add a file to `crypto/plugins/` implementing `EncryptionBackend` (see [plugin-system.md](plugin-system.md)) |
 | New vault schema | Add a file to `schemas/plugins/` implementing `Schema` (see [plugin-system.md](plugin-system.md)) |
-| New vault format version | Bump `vault.CURRENT_VERSION` and add an entry to `vault.MIGRATIONS` (see [migration.md](migration.md)) |
+| New vault format version | Bump `vault.CURRENT_VERSION` and add explicit version-migration handling in `vault.py` (see [migration.md](migration.md)) |
 | New audit check | Add a `find_*` function to `audit.py`, wired into `run_audit()` |
-| New CLI command | Add a `cmd_*` function and an `@app.command()` in `cli.py` (or `@config_app.command()` / `@vault_app.command()` for a subcommand) |
+| New CLI command | Add a `CredentialManager` method in `core/manager.py` (application logic, no printing/prompting) plus a `cmd_*` function and an `@app.command()` in `cli/commands.py` (argument parsing + rendering only; use `@config_app.command()` / `@vault_app.command()` for a subcommand) |
 
 ## Project layout reference
 

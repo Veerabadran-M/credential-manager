@@ -4,7 +4,7 @@ Typer CLI app -- multiple real (encrypted) vaults on disk, driven via
 match selection, authenticating only the selected vault, and leaving
 the active vault/config untouched.
 
-`credmgr.config.config` is a process-wide singleton that `cli.py`,
+`credmgr.config.config` is a process-wide singleton that `cli/commands.py`,
 `auth.py`, and `globalindex.py` all import the *same instance* of, so
 each test redirects it at a throwaway `tmp_path` via the `redirect_config`
 fixture rather than trying to swap the module-level name.
@@ -18,6 +18,7 @@ import pytest
 from typer.testing import CliRunner
 
 import credmgr.auth as auth_mod
+import credmgr.cli.commands as cli_commands_mod
 import credmgr.schemas.plugins.credentials as credentials_mod
 import credmgr.schemas.plugins.env as env_mod
 from credmgr import globalindex
@@ -26,6 +27,7 @@ from credmgr.config import config as real_config
 from credmgr.schemas.plugins.credentials import CredentialsSchema
 from credmgr.schemas.plugins.env import EnvSchema
 from credmgr.vault import Vault
+from credmgr.clipboard import ClipboardResult
 
 runner = CliRunner()
 
@@ -34,31 +36,33 @@ GEN_OPTS = {"generate": True, "length": 16, "words": 5}
 
 @pytest.fixture(autouse=True)
 def redirect_config(tmp_path, monkeypatch):
-    """Point the real config singleton (shared by cli.py/auth.py/
-    globalindex.py) at a throwaway directory, and never touch the real
-    clipboard or session cache."""
+    """Point the real config singleton (shared by cli/commands.py, auth.py,
+    core/manager.py, and globalindex.py) at a throwaway directory,
+    and never touch the real clipboard or session cache."""
     monkeypatch.setattr(real_config, "master_dir", tmp_path / ".credmgr")
     monkeypatch.setattr(real_config, "active_vault", "default")
-    monkeypatch.setattr(credentials_mod, "copy_to_clipboard", lambda value, label="Password": None)
-    monkeypatch.setattr(env_mod, "copy_to_clipboard", lambda value, label="Password": None)
+    monkeypatch.setattr(credentials_mod, "copy_to_clipboard", lambda value, label="Password": ClipboardResult(copied=False, label=label, reason="disabled in tests"))
+    monkeypatch.setattr(env_mod, "copy_to_clipboard", lambda value, label="Password": ClipboardResult(copied=False, label=label, reason="disabled in tests"))
     # Force a fresh master password prompt every time instead of hitting
     # a session cache from a previous test/process.
-    monkeypatch.setattr(auth_mod, "load_cached_dek", lambda vault_name=None: None)
-    monkeypatch.setattr(auth_mod, "cache_session", lambda dek, vault_name=None: None)
+    monkeypatch.setattr(auth_mod, "load_cached_dek", lambda config=None, vault_name=None: None)
+    monkeypatch.setattr(auth_mod, "cache_session", lambda dek, config=None, vault_name=None: None)
     # `safe_getpass` calls `getpass.getpass`, which opens /dev/tty directly
     # when one is available -- bypassing CliRunner's simulated stdin and
     # forcing a real human to type a password. Route it through `input()`
     # instead, which CliRunner's `input=` param does feed, so the
     # already-scripted passwords in each test drive the prompt
     # automatically regardless of whether a real tty is attached.
-    monkeypatch.setattr(auth_mod, "safe_getpass", lambda prompt="": input(prompt))
+    # (Patched on credmgr.cli.commands -- that's where
+    # PasswordRequired is now caught and prompted for, not credmgr.auth.)
+    monkeypatch.setattr(cli_commands_mod, "safe_getpass", lambda prompt="": input(prompt))
     return real_config
 
 
 def _seed_vault(config, name, backend_name, schema_name, password, populate):
     """Create a real encrypted vault, populate it via the schema (like a
     normal `add` would), save it, and update the search index -- exactly
-    what cli.py's mutation hooks do after every add/update/delete."""
+    what core/manager.py's mutation hooks do after every add/update/delete."""
     vault = Vault(config, name=name)
     dek = vault.create(backend_name, password, schema_name)
     document = vault.unlock_with_dek(dek)

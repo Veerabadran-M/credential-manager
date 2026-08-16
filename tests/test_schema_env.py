@@ -9,11 +9,12 @@ import pytest
 import credmgr.schemas.plugins.env as env_mod
 from credmgr.schemas.base import SchemaError
 from credmgr.schemas.plugins.env import EnvDocument, EnvSchema
+from credmgr.clipboard import ClipboardResult
 
 
 @pytest.fixture(autouse=True)
 def no_clipboard(monkeypatch):
-    monkeypatch.setattr(env_mod, "copy_to_clipboard", lambda value, label="Password": None)
+    monkeypatch.setattr(env_mod, "copy_to_clipboard", lambda value, label="Password": ClipboardResult(copied=False, label=label, reason="disabled in tests"))
 
 
 @pytest.fixture
@@ -99,16 +100,16 @@ def test_serialize_empty_document_is_empty_bytes():
 
 def test_cmd_add_creates_entry(schema, config):
     doc = EnvDocument()
-    changed = schema.cmd_add(doc, ["API_KEY", "secret123"], {}, config)
-    assert changed is True
+    result = schema.cmd_add(doc, ["API_KEY", "secret123"], {}, config)
+    assert result.mutated is True
     assert doc.get("API_KEY") == "secret123"
 
 
 def test_cmd_add_duplicate_key_rejected(schema, config):
     doc = EnvDocument()
     schema.cmd_add(doc, ["API_KEY", "one"], {}, config)
-    changed = schema.cmd_add(doc, ["API_KEY", "two"], {}, config)
-    assert changed is False
+    result = schema.cmd_add(doc, ["API_KEY", "two"], {}, config)
+    assert result.mutated is False
     assert doc.get("API_KEY") == "one"
 
 
@@ -125,62 +126,60 @@ def test_cmd_add_rejects_value_with_newline(schema, config):
 def test_cmd_update_existing_key(schema, config):
     doc = EnvDocument()
     schema.cmd_add(doc, ["API_KEY", "old"], {}, config)
-    changed = schema.cmd_update(doc, ["API_KEY", "new"], {}, config)
-    assert changed is True
+    result = schema.cmd_update(doc, ["API_KEY", "new"], {}, config)
+    assert result.mutated is True
     assert doc.get("API_KEY") == "new"
 
 
 def test_cmd_update_missing_key_returns_false(schema, config):
-    changed = schema.cmd_update(EnvDocument(), ["API_KEY", "new"], {}, config)
-    assert changed is False
+    result = schema.cmd_update(EnvDocument(), ["API_KEY", "new"], {}, config)
+    assert result.mutated is False
 
 
 def test_cmd_delete_existing_key(schema, config):
     doc = EnvDocument()
     schema.cmd_add(doc, ["API_KEY", "value"], {}, config)
-    changed = schema.cmd_delete(doc, ["API_KEY"], config)
-    assert changed is True
+    result = schema.cmd_delete(doc, ["API_KEY"], config)
+    assert result.mutated is True
     assert doc.get("API_KEY") is None
 
 
 def test_cmd_delete_missing_key_returns_false(schema, config):
-    changed = schema.cmd_delete(EnvDocument(), ["API_KEY"], config)
-    assert changed is False
+    result = schema.cmd_delete(EnvDocument(), ["API_KEY"], config)
+    assert result.mutated is False
 
 
 def test_cmd_delete_ambiguous_key_returns_false(schema, config):
     doc = EnvDocument()
     schema.cmd_add(doc, ["API_KEY_ONE", "v"], {}, config)
     schema.cmd_add(doc, ["API_KEY_TWO", "v"], {}, config)
-    changed = schema.cmd_delete(doc, ["API_KEY"], config)
-    assert changed is False
+    result = schema.cmd_delete(doc, ["API_KEY"], config)
+    assert result.mutated is False
 
 
 # ---- cmd_get / cmd_search ----
 
-def test_cmd_get_all_entries(schema, config, capsys):
+def test_cmd_get_all_entries(schema, config):
     doc = EnvDocument()
     schema.cmd_add(doc, ["API_KEY", "secret"], {}, config)
-    schema.cmd_get(doc, [], config)
-    out = capsys.readouterr().out
-    assert "API_KEY" in out
-    assert "secret" in out
+    result = schema.cmd_get(doc, [], config)
+    text = "\n".join(line.text for line in result.lines)
+    assert "API_KEY" in text
+    assert "secret" in text
 
 
-def test_cmd_get_specific_key(schema, config, capsys):
+def test_cmd_get_specific_key(schema, config):
     doc = EnvDocument()
     schema.cmd_add(doc, ["API_KEY", "secret"], {}, config)
-    schema.cmd_get(doc, ["API_KEY"], config)
-    out = capsys.readouterr().out
-    assert "secret" in out
+    result = schema.cmd_get(doc, ["API_KEY"], config)
+    assert any("secret" in line.text for line in result.lines)
 
 
-def test_cmd_search_partial_match(schema, config, capsys):
+def test_cmd_search_partial_match(schema, config):
     doc = EnvDocument()
     schema.cmd_add(doc, ["DATABASE_URL", "postgres://x"], {}, config)
-    schema.cmd_search(doc, "DATABASE", config)
-    out = capsys.readouterr().out
-    assert "DATABASE_URL" in out
+    result = schema.cmd_search(doc, "DATABASE", config)
+    assert any("DATABASE_URL" in line.text for line in result.lines)
 
 
 # ---- cmd_import / cmd_export ----
@@ -190,8 +189,8 @@ def test_cmd_import_adds_new_entries(schema, config, tmp_path):
     path = tmp_path / "env.txt"
     path.write_text("A=1\nB=2\n", encoding="utf-8")
 
-    changed = schema.cmd_import(doc, str(path), config)
-    assert changed is True
+    result = schema.cmd_import(doc, str(path), config)
+    assert result.mutated is True
     assert doc.get("A") == "1"
     assert doc.get("B") == "2"
 
@@ -211,18 +210,16 @@ def test_cmd_import_skips_duplicates(schema, config, tmp_path):
 def test_cmd_import_no_valid_entries_returns_false(schema, config, tmp_path):
     path = tmp_path / "env.txt"
     path.write_text("not valid content\n", encoding="utf-8")
-    changed = schema.cmd_import(EnvDocument(), str(path), config)
-    assert changed is False
+    result = schema.cmd_import(EnvDocument(), str(path), config)
+    assert result.mutated is False
 
 
-def test_cmd_export_serializes_document(schema, config, capsys):
+def test_cmd_export_serializes_document(schema, config):
     doc = EnvDocument()
     schema.cmd_add(doc, ["A", "1"], {}, config)
-    capsys.readouterr()  # discard "Added 'A'" output from cmd_add
 
-    schema.cmd_export(doc, config)
-    out = capsys.readouterr().out
-    assert out == "A=1\n"
+    result = schema.cmd_export(doc, config)
+    assert result.raw == "A=1\n"
 
 
 # ---- index_entries (credmgr global) ----
@@ -237,21 +234,19 @@ def test_index_entries_one_row_per_key(schema, config):
     schema.cmd_add(doc, ["DB_PASSWORD", "hunter2"], {}, config)
 
     entries = schema.index_entries(doc)
-    assert sorted(e.fields["lhs"] for e in entries) == ["DB_PASSWORD", "OPENAI_API_KEY"]
+    assert sorted(e.fields["key"] for e in entries) == ["DB_PASSWORD", "OPENAI_API_KEY"]
 
 
-def test_index_entries_args_resolve_via_cmd_get(schema, config, capsys):
+def test_index_entries_args_resolve_via_cmd_get(schema, config):
     doc = EnvDocument()
     schema.cmd_add(doc, ["OPENAI_API_KEY", "sk-secret"], {}, config)
-    capsys.readouterr()
 
     [entry] = schema.index_entries(doc)
     assert entry.args == ["OPENAI_API_KEY"]
     assert entry.summary == [("Key", "OPENAI_API_KEY")]
 
-    schema.cmd_get(doc, entry.args, config)
-    out = capsys.readouterr().out
-    assert "OPENAI_API_KEY" in out
+    result = schema.cmd_get(doc, entry.args, config)
+    assert any("OPENAI_API_KEY" in line.text for line in result.lines)
 
 
 def test_index_entries_never_include_the_value(schema, config):

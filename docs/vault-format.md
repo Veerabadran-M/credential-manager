@@ -3,7 +3,6 @@
 This document describes the on-disk layout of a `credmgr` vault, the
 multi-vault directory structure, and how the vault lifecycle works.
 For the encryption applied to the fields below, see [crypto.md](crypto.md).
-For upgrading old vaults, see [migration.md](migration.md).
 
 ## Directory layout
 
@@ -42,7 +41,7 @@ switch it with `credmgr vault use <name>`.
 
 ```json
 {
-    "version": 2,
+    "version": 1,
     "schema": "credentials",
     "kdf": {
         "algorithm": "argon2id",
@@ -61,7 +60,7 @@ switch it with `credmgr vault use <name>`.
 
 | Field | Meaning |
 |---|---|
-| `version` | Vault file schema version (see [migration.md](migration.md)). Currently `2`. |
+| `version` | Vault file format version (see [migration.md](migration.md)). Currently `1` (Vault Format v1). |
 | `schema` | Name of the registered `Schema` plugin that owns the shape of the decrypted `vault` contents (e.g. `credentials`, `env`). Stored in plaintext — needed to route CRUD commands *before* the vault can be decrypted. |
 | `kdf` | Argon2id parameters and random salt used to derive the KEK from the master password. Fixed for the life of a vault. |
 | `backend` | Name of the registered crypto plugin that encrypted `encrypted_key` and `vault`. Looked up through the crypto registry on every unlock — this module never hardcodes an algorithm. |
@@ -110,18 +109,3 @@ If `vault.json` is corrupted or unreadable on the next read (e.g. the
 process was killed mid-write on step 4), `credmgr` automatically falls
 back to `vault.bak` and restores it as the primary file. Vault directories
 are created with `0700` permissions and vault files with `0600`.
-
-## Legacy single-vault layout
-
-Installs from before multi-vault support used a flatter layout:
-
-```
-~/.credmgr/vault.json
-~/.credmgr/vault.bak
-```
-
-`vaultmgr.migrate_legacy_layout()` runs once, automatically, at startup:
-it moves that file into `~/.credmgr/vaults/default/`, stamps its `schema`
-field as `credentials` if missing, and sets `active_vault` to `default`.
-See [migration.md](migration.md) for the full migration story, including
-the underlying `version: 1 → 2` vault-format migration.

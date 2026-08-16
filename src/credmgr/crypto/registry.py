@@ -127,7 +127,7 @@ def resolve_backend(cli_value: str | None = None, config_value: str | None = Non
 
         CLI option > environment variable > config file > built-in default
 
-    `cli_value` and `config_value` are passed in by the caller (cli.py /
+    `cli_value` and `config_value` are passed in by the caller (cli/commands.py /
     config.py) so this module doesn't need to import either of them.
     """
     if cli_value:

@@ -3,42 +3,40 @@
 Security: clearing happens in a forked background process that sleeps
 for config.clipboard_timeout, then wipes the clipboard only if it still
 holds the value that was copied, so a secret doesn't linger indefinitely.
+
+This module is core application code: it never prints. `copy_to_clipboard`
+returns a ClipboardResult describing what happened; callers (schema
+plugins, then frontends) decide how to tell the user.
 """
 
 from __future__ import annotations
 
 import os
 import time
+from dataclasses import dataclass
 
 from .config import config
-from .ui import console
 
 try:
     import pyperclip
 except ImportError:
     pyperclip = None
 
-def copy_to_clipboard(value: str, label: str = "Password") -> None:
+@dataclass
+class ClipboardResult:
+    copied: bool
+    label: str
+    timeout: int | None = None  # seconds until auto-clear, when copied is True
+    reason: str | None = None   # human-readable reason, when copied is False
+
+def copy_to_clipboard(value: str, label: str = "Password") -> ClipboardResult:
     if pyperclip is None:
-        console.print(
-            f"  [bold yellow]pyperclip is not installed -- {label.lower()} "
-            "was not copied.[/bold yellow]"
-        )
-        return
+        return ClipboardResult(copied=False, label=label, reason="pyperclip is not installed")
 
     try:
         pyperclip.copy(value)
     except pyperclip.PyperclipException:
-        console.print(
-            f"  [bold yellow]No clipboard mechanism available on this system "
-            f"-- {label.lower()} was not copied.[/bold yellow]"
-        )
-        return
-
-    console.print(
-        f"  [bold green]{label} copied to clipboard.[/bold green] "
-        f"[dim]Clears in {config.clipboard_timeout}s.[/dim]"
-    )
+        return ClipboardResult(copied=False, label=label, reason="no clipboard mechanism available on this system")
 
     pid = os.fork()
     if pid == 0:
@@ -50,3 +48,5 @@ def copy_to_clipboard(value: str, label: str = "Password") -> None:
             pass
         finally:
             os._exit(0)
+
+    return ClipboardResult(copied=True, label=label, timeout=config.clipboard_timeout)

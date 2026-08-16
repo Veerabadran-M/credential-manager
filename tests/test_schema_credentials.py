@@ -13,12 +13,13 @@ import credmgr.schemas.plugins.credentials as credentials_mod
 from credmgr.models import Account, Credentials
 from credmgr.schemas.base import SchemaError
 from credmgr.schemas.plugins.credentials import CredentialsSchema
+from credmgr.clipboard import ClipboardResult
 
 
 @pytest.fixture(autouse=True)
 def no_clipboard(monkeypatch):
     """Never touch the real clipboard/fork a background process in tests."""
-    monkeypatch.setattr(credentials_mod, "copy_to_clipboard", lambda value, label="Password": None)
+    monkeypatch.setattr(credentials_mod, "copy_to_clipboard", lambda value, label="Password": ClipboardResult(copied=False, label=label, reason="disabled in tests"))
 
 
 @pytest.fixture
@@ -52,8 +53,8 @@ def test_parse_and_serialize_round_trip():
 
 def test_cmd_add_creates_new_account(schema, config):
     doc = Credentials()
-    changed = schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
-    assert changed is True
+    result = schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
+    assert result.mutated is True
     assert doc.services["github"][0].userid == "alice"
     assert len(doc.services["github"][0].password) == 16
 
@@ -61,8 +62,8 @@ def test_cmd_add_creates_new_account(schema, config):
 def test_cmd_add_duplicate_userid_rejected(schema, config):
     doc = Credentials()
     schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
-    changed = schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
-    assert changed is False
+    result = schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
+    assert result.mutated is False
     assert len(doc.services["github"]) == 1
 
 
@@ -89,8 +90,8 @@ def test_cmd_update_userid_renames_account(schema, config):
     doc = Credentials()
     schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
 
-    changed = schema.cmd_update(doc, ["github", "alice", "userid", "alice2"], GEN_OPTS, config)
-    assert changed is True
+    result = schema.cmd_update(doc, ["github", "alice", "userid", "alice2"], GEN_OPTS, config)
+    assert result.mutated is True
     assert doc.services["github"][0].userid == "alice2"
 
 
@@ -117,8 +118,8 @@ def test_cmd_update_notes(schema, config):
     doc = Credentials()
     schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
 
-    changed = schema.cmd_update(doc, ["github", "alice", "notes", "updated note"], GEN_OPTS, config)
-    assert changed is True
+    result = schema.cmd_update(doc, ["github", "alice", "notes", "updated note"], GEN_OPTS, config)
+    assert result.mutated is True
     assert doc.services["github"][0].notes == "updated note"
 
 
@@ -134,8 +135,8 @@ def test_cmd_update_account_changes_userid_and_password(schema, config):
     schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
     old_password = doc.services["github"][0].password
 
-    changed = schema.cmd_update(doc, ["github", "alice", "account", "alice3"], GEN_OPTS, config)
-    assert changed is True
+    result = schema.cmd_update(doc, ["github", "alice", "account", "alice3"], GEN_OPTS, config)
+    assert result.mutated is True
     acc = doc.services["github"][0]
     assert acc.userid == "alice3"
     assert acc.password != old_password
@@ -153,10 +154,10 @@ def test_cmd_update_too_few_args_raises(schema, config):
         schema.cmd_update(Credentials(), ["github", "alice"], GEN_OPTS, config)
 
 
-def test_cmd_update_nonexistent_account_returns_false(schema, config):
+def test_cmd_update_nonexistent_account_raises(schema, config):
     doc = Credentials()
-    changed = schema.cmd_update(doc, ["github", "alice", "notes", "x"], GEN_OPTS, config)
-    assert changed is False
+    with pytest.raises(SchemaError, match="not found"):
+        schema.cmd_update(doc, ["github", "alice", "notes", "x"], GEN_OPTS, config)
 
 
 # ---- cmd_delete ----
@@ -166,8 +167,8 @@ def test_cmd_delete_specific_account(schema, config):
     schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
     schema.cmd_add(doc, ["github", "bob"], GEN_OPTS, config)
 
-    changed = schema.cmd_delete(doc, ["github", "alice"], config)
-    assert changed is True
+    result = schema.cmd_delete(doc, ["github", "alice"], config)
+    assert result.mutated is True
     assert [a.userid for a in doc.services["github"]] == ["bob"]
 
 
@@ -175,45 +176,49 @@ def test_cmd_delete_last_account_removes_service(schema, config):
     doc = Credentials()
     schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
 
-    changed = schema.cmd_delete(doc, ["github", "alice"], config)
-    assert changed is True
+    result = schema.cmd_delete(doc, ["github", "alice"], config)
+    assert result.mutated is True
     assert "github" not in doc.services
 
 
-def test_cmd_delete_whole_service_confirmed(schema, config, monkeypatch):
+def test_cmd_delete_whole_service_confirmed(schema, config):
     doc = Credentials()
     schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
     schema.cmd_add(doc, ["github", "bob"], GEN_OPTS, config)
 
-    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
-    changed = schema.cmd_delete(doc, ["github"], config)
-    assert changed is True
+    pending = schema.cmd_delete(doc, ["github"], config)
+    assert pending.needs_confirmation is True
+    assert pending.mutated is False
+    assert "github" in doc.services
+
+    result = schema.cmd_delete(doc, ["github"], config, confirmed=True)
+    assert result.mutated is True
     assert "github" not in doc.services
 
 
-def test_cmd_delete_whole_service_aborted(schema, config, monkeypatch):
+def test_cmd_delete_whole_service_aborted(schema, config):
     doc = Credentials()
     schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
 
-    monkeypatch.setattr("builtins.input", lambda prompt="": "n")
-    changed = schema.cmd_delete(doc, ["github"], config)
-    assert changed is False
+    result = schema.cmd_delete(doc, ["github"], config)
+    assert result.needs_confirmation is True
+    assert result.mutated is False
     assert "github" in doc.services
 
 
-def test_cmd_delete_nonexistent_service_returns_false(schema, config):
-    changed = schema.cmd_delete(Credentials(), ["nope"], config)
-    assert changed is False
+def test_cmd_delete_nonexistent_service_raises(schema, config):
+    with pytest.raises(SchemaError, match="not found"):
+        schema.cmd_delete(Credentials(), ["nope"], config)
 
 
 # ---- cmd_get / cmd_search / cmd_history (smoke tests -- must not raise) ----
 
-def test_cmd_get_existing_service(schema, config, capsys):
+def test_cmd_get_existing_service(schema, config):
     doc = Credentials()
     schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
-    schema.cmd_get(doc, ["github"], config)
-    out = capsys.readouterr().out
-    assert "alice" in out
+    result = schema.cmd_get(doc, ["github"], config)
+    assert result.table is not None
+    assert any("alice" in row for row in result.table.rows)
 
 
 def test_cmd_get_missing_service_does_not_raise(schema, config):
@@ -225,37 +230,36 @@ def test_cmd_get_bad_args_raises(schema, config):
         schema.cmd_get(Credentials(), [], config)
 
 
-def test_cmd_search_finds_match(schema, config, capsys):
+def test_cmd_search_finds_match(schema, config):
     doc = Credentials()
     schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
-    schema.cmd_search(doc, "alice", config)
-    out = capsys.readouterr().out
-    assert "alice" in out
+    result = schema.cmd_search(doc, "alice", config)
+    assert any("alice" in line.text for line in result.lines)
 
 
-def test_cmd_history_no_history_message(schema, config, capsys):
+def test_cmd_history_no_history_message(schema, config):
     doc = Credentials()
     schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
-    schema.cmd_history(doc, ["github", "alice"], config)
-    out = capsys.readouterr().out
-    assert "No password history" in out
+    result = schema.cmd_history(doc, ["github", "alice"], config)
+    assert any("No password history" in line.text for line in result.lines)
 
 
-def test_cmd_history_shows_entries_after_password_update(schema, config, capsys):
+def test_cmd_history_shows_entries_after_password_update(schema, config):
     doc = Credentials()
     schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
     schema.cmd_update(doc, ["github", "alice", "password"], GEN_OPTS, config)
 
-    schema.cmd_history(doc, ["github", "alice"], config)
-    out = capsys.readouterr().out
-    assert "Password history" in out
+    result = schema.cmd_history(doc, ["github", "alice"], config)
+    assert any("Password history" in line.text for line in result.lines)
 
 
 def test_cmd_copy_single_account_no_prompt_needed(schema, config):
     doc = Credentials()
     schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
-    # Should not raise/prompt since there's exactly one account.
-    schema.cmd_copy(doc, ["github"], config)
+    # Should not raise, and should not ask the caller to disambiguate
+    # since there's exactly one account.
+    result = schema.cmd_copy(doc, ["github"], config)
+    assert not result.choices
 
 
 # ---- cmd_import / cmd_export ----
@@ -266,8 +270,8 @@ def test_cmd_import_valid_file(schema, config, tmp_path):
     path = tmp_path / "import.json"
     path.write_text(json.dumps(import_data), encoding="utf-8")
 
-    changed = schema.cmd_import(doc, str(path), config)
-    assert changed is True
+    result = schema.cmd_import(doc, str(path), config)
+    assert result.mutated is True
     assert doc.services["github"][0].userid == "alice"
 
 
@@ -284,43 +288,40 @@ def test_cmd_import_skips_duplicate_userid(schema, config, tmp_path):
 
 
 def test_cmd_import_missing_file_returns_false(schema, config):
-    changed = schema.cmd_import(Credentials(), "/nonexistent/path.json", config)
-    assert changed is False
+    result = schema.cmd_import(Credentials(), "/nonexistent/path.json", config)
+    assert result.mutated is False
 
 
 def test_cmd_import_invalid_json_returns_false(schema, config, tmp_path):
     path = tmp_path / "bad.json"
     path.write_text("not json", encoding="utf-8")
-    changed = schema.cmd_import(Credentials(), str(path), config)
-    assert changed is False
+    result = schema.cmd_import(Credentials(), str(path), config)
+    assert result.mutated is False
 
 
 def test_cmd_import_non_object_top_level_returns_false(schema, config, tmp_path):
     path = tmp_path / "list.json"
     path.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
-    changed = schema.cmd_import(Credentials(), str(path), config)
-    assert changed is False
+    result = schema.cmd_import(Credentials(), str(path), config)
+    assert result.mutated is False
 
 
-def test_cmd_export_prints_valid_json(schema, config, capsys):
+def test_cmd_export_prints_valid_json(schema, config):
     doc = Credentials()
     schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
-    capsys.readouterr()  # discard "Generated Password"/"Added" output from cmd_add
 
-    schema.cmd_export(doc, config)
-    out = capsys.readouterr().out
-    parsed = json.loads(out)
+    result = schema.cmd_export(doc, config)
+    parsed = json.loads(result.raw)
     assert parsed["github"][0]["userid"] == "alice"
 
 
 # ---- cmd_audit (smoke test) ----
 
-def test_cmd_audit_runs_without_error(schema, config, capsys):
+def test_cmd_audit_runs_without_error(schema, config):
     doc = Credentials()
     schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
-    schema.cmd_audit(doc, config)
-    out = capsys.readouterr().out
-    assert "Password Audit" in out
+    result = schema.cmd_audit(doc, config)
+    assert any("Password Audit" in line.text for line in result.lines)
 
 
 # ---- index_entries (credmgr global) ----
@@ -341,10 +342,9 @@ def test_index_entries_one_row_per_account(schema, config):
     assert fields == [("github", "alice"), ("github", "bob"), ("gitlab", "alice")]
 
 
-def test_index_entries_args_resolve_via_cmd_get(schema, config, capsys):
+def test_index_entries_args_resolve_via_cmd_get(schema, config):
     doc = Credentials()
     schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
-    capsys.readouterr()
 
     [entry] = schema.index_entries(doc)
     assert entry.args == ["github", "alice"]
@@ -352,9 +352,9 @@ def test_index_entries_args_resolve_via_cmd_get(schema, config, capsys):
 
     # The whole point of `args`: cmd_get(doc, entry.args, config) must
     # resolve to exactly the account this entry describes.
-    schema.cmd_get(doc, entry.args, config)
-    out = capsys.readouterr().out
-    assert "github" in out and "alice" in out
+    result = schema.cmd_get(doc, entry.args, config)
+    assert result.table is not None
+    assert any("alice" in row for row in result.table.rows)
 
 
 def test_index_entries_never_include_password_field_name(schema, config):

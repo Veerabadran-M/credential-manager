@@ -1,10 +1,9 @@
 # Cryptography
 
-`credmgr` uses **envelope encryption**, the same pattern used by most cloud
-KMS designs, to keep the master password separate from the key that
-actually protects your data. This document covers the key derivation,
-the AEAD backends available, and how encryption flows during common
-operations.
+`credmgr` uses **envelope encryption** to keep the master password
+separate from the key that actually protects your data. This document
+covers the key derivation, the AEAD backends available, and how
+encryption flows during common operations.
 
 For how backends are discovered and how to write a new one, see
 [plugin-system.md](plugin-system.md). For where these values are stored
@@ -76,7 +75,7 @@ underlying library raised its own internal exception.
 |---|---|---|---|---|
 | `xchacha-pynacl` **(default)** | XChaCha20-Poly1305 | 256/192-bit | `PyNaCl` | Extended nonce further reduces nonce-reuse risk |
 | `aesgcm-pycryptodome` | AES-256-GCM | 256/96-bit | `pycryptodome` | Pure-C dependency, no Rust toolchain needed |
-| `aesgcm-cryptography` | AES-256-GCM | 256/96-bit | `cryptography` | Hardware-accelerated (AES-NI) on most CPUs |
+| `aesgcm-cryptography` | AES-256-GCM | 256/96-bit | `cryptography` | Can take advantage of hardware AES acceleration (e.g. AES-NI) where the CPU and build of `cryptography` support it |
 
 Each operation binds a fixed AAD string (`"credmgr-dek"` or
 `"credmgr-vault"`), domain-separating the two contexts so a wrapped-DEK
@@ -143,8 +142,9 @@ credmgr migrate --backend xchacha-pynacl
    procedure as any write; see [vault-format.md](vault-format.md)).
 6. Invalidates any cached session key, since the DEK changed.
 
-**No plaintext ever touches disk** — decrypted contents exist only as an
-in-memory `bytes` object between steps 2 and 5.
+**No decrypted vault contents are intentionally written to disk** during
+this process — they exist only as an in-memory `bytes` object between
+steps 2 and 5.
 
 Migrating to a backend whose dependency isn't installed fails fast,
 *before* prompting for a password:

@@ -35,7 +35,7 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: End Users/Desktop",
     "Intended Audience :: Developers",
-    "Operating System :: POSIX",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.10",
@@ -58,7 +58,8 @@ dependencies = [
 # credmgr's core never imports a crypto library directly -- each backend
 # plugin (credmgr/crypto/plugins/) is only usable if its own dependency is
 # installed. Install whichever backend(s) you plan to use, or "all" for
-# every bundled backend. See the README's "Plugin Architecture" section.
+# every bundled backend. See docs/plugin-system.md for the crypto plugin
+# interface, and the README's "Installation" section for setup.
 cryptography = ["cryptography>=42.0.0"]
 pynacl = ["PyNaCl>=1.5.0"]
 pycryptodome = ["pycryptodome>=3.20.0"]

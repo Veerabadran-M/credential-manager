@@ -1,7 +1,7 @@
 """Tests for the cross-vault metadata search index (credmgr/globalindex.py):
 persistence, staleness detection, and search matching. Never touches real
 vault encryption -- documents are built directly against the schema
-plugins, mirroring how cli.py already has a decrypted document in hand
+plugins, mirroring how core/manager.py already has a decrypted document in hand
 when it calls update_vault().
 """
 
@@ -17,6 +17,7 @@ from credmgr.models import Credentials
 from credmgr.schemas.plugins.credentials import CredentialsSchema
 from credmgr.schemas.plugins.env import EnvDocument, EnvSchema
 from credmgr.vault import Vault
+from credmgr.clipboard import ClipboardResult
 
 GEN_OPTS = {"generate": True, "length": 16, "words": 5}
 
@@ -25,8 +26,8 @@ GEN_OPTS = {"generate": True, "length": 16, "words": 5}
 def no_clipboard(monkeypatch):
     import credmgr.schemas.plugins.credentials as credentials_mod
     import credmgr.schemas.plugins.env as env_mod
-    monkeypatch.setattr(credentials_mod, "copy_to_clipboard", lambda value, label="Password": None)
-    monkeypatch.setattr(env_mod, "copy_to_clipboard", lambda value, label="Password": None)
+    monkeypatch.setattr(credentials_mod, "copy_to_clipboard", lambda value, label="Password": ClipboardResult(copied=False, label=label, reason="disabled in tests"))
+    monkeypatch.setattr(env_mod, "copy_to_clipboard", lambda value, label="Password": ClipboardResult(copied=False, label=label, reason="disabled in tests"))
 
 
 def _make_vault(config, name, backend_name):

@@ -8,16 +8,17 @@ discovery pattern:
 - **Schemas** (`credmgr/schemas/plugins/`) — what shape a vault's
   contents take, and which commands it supports.
 
-Neither the CLI nor the vault storage layer hardcodes a list of plugins.
-Both are discovered from the filesystem at runtime, so adding a new
-backend or schema is purely additive: one new file, no edits anywhere
-else (the Open/Closed Principle in practice).
+Neither the CLI, the application core, nor the vault storage layer
+hardcodes a list of plugins. Both are discovered from the filesystem at
+runtime, so adding a new backend or schema typically means adding one
+new file rather than editing existing ones (the Open/Closed Principle
+in practice).
 
 ## Plugin architecture
 
 ```mermaid
 flowchart TB
-    subgraph Core["Application core (cli.py, vault.py)"]
+    subgraph Core["Application core (core/manager.py, vault.py)"]
         direction TB
         C1[Never imports a crypto library directly]
         C2["Never knows a schema's document shape"]
@@ -103,8 +104,9 @@ import-time crash.
 
 ### Writing a custom crypto plugin
 
-A new backend needs exactly one new file in `credmgr/crypto/plugins/` —
-nothing else changes.
+A new backend needs one new file in `credmgr/crypto/plugins/`; the
+checklist below covers the other small, one-time steps (registering the
+pip extra, adding a contract test).
 
 ```python
 # credmgr/crypto/plugins/my_backend.py
@@ -169,8 +171,9 @@ Checklist:
 - [ ] Add a test module mirroring `tests/test_backend_contract.py` (picked
       up automatically via `available_backends()`).
 
-No changes needed to `registry.py`, `vault.py`, `cli.py`, or `config.py` —
-`pkgutil`-based discovery finds the new file on next run.
+No changes needed to `registry.py`, `vault.py`, `core/manager.py`,
+`cli/commands.py`, or `config.py` — `pkgutil`-based discovery finds the
+new file on next run.
 
 ## The schema interface
 
@@ -182,20 +185,22 @@ class Schema(ABC):
     def parse(cls, plaintext: bytes) -> Any: ...      # decrypted bytes -> in-memory document
     def serialize(cls, document: Any) -> bytes: ...   # in-memory document -> plaintext bytes
 
-    # CRUD, dispatched generically by cli.py. Each has a default that
-    # raises SchemaError; override only what your schema supports.
-    def cmd_list(self, document, args, config): ...
-    def cmd_list_all(self, document, config): ...
-    def cmd_get(self, document, args, config): ...
-    def cmd_add(self, document, args, opts, config) -> bool: ...
-    def cmd_update(self, document, args, opts, config) -> bool: ...
-    def cmd_delete(self, document, args, config) -> bool: ...
-    def cmd_search(self, document, query, config): ...
-    def cmd_copy(self, document, args, config): ...
-    def cmd_history(self, document, args, config): ...
-    def cmd_audit(self, document, config): ...
-    def cmd_import(self, document, filepath, config) -> bool: ...
-    def cmd_export(self, document, config): ...
+    # CRUD, dispatched generically by core/manager.py. Each has a
+    # default that raises SchemaError; override only what your schema
+    # supports. None of these may print or read from the terminal --
+    # they return a CommandResult (see architecture.md) instead.
+    def cmd_list(self, document, args, config) -> CommandResult: ...
+    def cmd_list_all(self, document, config) -> CommandResult: ...
+    def cmd_get(self, document, args, config) -> CommandResult: ...
+    def cmd_add(self, document, args, opts, config) -> CommandResult: ...
+    def cmd_update(self, document, args, opts, config) -> CommandResult: ...
+    def cmd_delete(self, document, args, config, confirmed=False) -> CommandResult: ...
+    def cmd_search(self, document, query, config) -> CommandResult: ...
+    def cmd_copy(self, document, args, config) -> CommandResult: ...
+    def cmd_history(self, document, args, config) -> CommandResult: ...
+    def cmd_audit(self, document, config) -> CommandResult: ...
+    def cmd_import(self, document, filepath, config) -> CommandResult: ...
+    def cmd_export(self, document, config) -> CommandResult: ...
 
     # Cross-vault search index for `credmgr global` (see globalindex.py).
     # Default raises SchemaError, same as the cmd_* methods -- a schema
@@ -203,20 +208,25 @@ class Schema(ABC):
     def index_entries(self, document) -> list[IndexEntry]: ...
 ```
 
-`cli.py` collects raw CLI arguments and shared option flags
-(`generate`, `passphrase`, `length`, `words`, `notes`) and hands them,
-unopinionated, to whichever `cmd_*` method the invoked command maps to.
-Mutating methods return `True` if the document changed and should be
-persisted, `False`/`None` otherwise. A schema that doesn't support an
+`core/manager.py`'s `CredentialManager` collects raw CLI arguments and
+shared option flags (`generate`, `passphrase`, `length`, `words`,
+`notes`) and hands them, unopinionated, to whichever `cmd_*` method the
+invoked command maps to. It persists the vault whenever the returned
+`CommandResult.mutated` is `True`. A schema that doesn't support an
 operation simply doesn't override it — the default raises `SchemaError`,
-which `cli.py` reports as a clean error message instead of a traceback.
+which the CLI frontend reports as a clean error message instead of a
+traceback. A schema that needs a secret value it wasn't given (e.g. a
+new password, when the caller didn't ask to generate one and didn't
+supply one) raises `SecretRequired`, which a frontend catches the same
+way it catches `PasswordRequired` -- see architecture.md's
+"Frontend/core split".
 
 `cmd_list_all` is the one method not called once per invocation: the
 `credmgr list-all` command authenticates against *every* vault on disk
 (see `vaultmgr.list_vault_names`) and calls `cmd_list_all(document,
 config)` once per vault, against whichever schema that vault happens to
-use, printing a header line between vaults. Everything else in `cli.py`
-operates on the single active vault.
+use, printing a header line between vaults. Everything else operates on
+the single active vault.
 
 ### `index_entries` and the `global` command
 
@@ -241,15 +251,15 @@ calls it right after any command saves a vault, and stores the result
 never secrets. `credentials` indexes one entry per `(service, userid)`
 pair; `env` indexes one entry per key. Neither schema needs to know
 `global` exists beyond implementing this one method — `globalindex.py`
-and `cli.py`'s `global` command never import or special-case either
+and the `global` command never import or special-case either
 plugin.
 
 Once a search narrows down to one entry and the user picks it,
-`cli.py` unlocks *only* that entry's vault and calls
-`schema.cmd_get(document, entry.args, config)` — the same `cmd_get`
-every schema already implements for the plain `get` command. That's the
-whole "resolve a selected entry after unlock" step: no new dispatch
-path, no schema-specific branching in `global` itself.
+`CredentialManager.get_from_vault()` unlocks *only* that entry's vault
+and calls `schema.cmd_get(document, entry.args, config)` — the same
+`cmd_get` every schema already implements for the plain `get` command.
+That's the whole "resolve a selected entry after unlock" step: no new
+dispatch path, no schema-specific branching in `global` itself.
 
 A schema that doesn't override `index_entries` (the default raises
 `SchemaError`) simply never contributes entries to the index — its
@@ -264,7 +274,7 @@ vaults are silently skipped by `global`, not crashed on.
 
 `list-all` prints a bare, unfiltered per-vault listing shaped by the
 schema: every service with every userid under it (`credentials`), or
-every key/LHS (`env`) — no counts, no truncation, just the identifiers.
+every key (`env`) — no counts, no truncation, just the identifiers.
 
 The `env` schema's on-disk plaintext (before encryption) is a flat
 `KEY=VALUE`-per-line text file — blank lines and `#`-prefixed lines are
@@ -275,8 +285,9 @@ given.
 
 Create a module under `credmgr/schemas/plugins/` with a class
 implementing `Schema` and a unique `.name`; it's discovered automatically
-the same way crypto plugins are. Nothing in `vault.py` or `cli.py` needs
-to change. When creating a new vault for your schema:
+the same way crypto plugins are. Nothing in `vault.py` or
+`core/manager.py` needs to change. When creating a new vault for
+your schema:
 
 ```bash
 credmgr vault create <name> --schema <your-schema-name>

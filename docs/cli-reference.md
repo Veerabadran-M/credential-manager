@@ -6,36 +6,41 @@ up-to-date usage — this page is a organized companion, not a replacement.
 
 ## Request flow
 
-Every command follows the same generic dispatch path through `cli.py`,
-regardless of which schema the active vault uses:
+Every command follows the same generic dispatch path through
+`cli/commands.py` and `core/manager.py`, regardless of which schema the
+active vault uses:
 
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant CLI as cli.py (Typer)
+    participant CLI as cli/commands.py (Typer)
+    participant Core as core/manager.py
     participant Auth as auth.py
     participant Vault as vault.py
     participant Schema as active schema plugin
 
     U->>CLI: credmgr add netflix alice --generate
-    CLI->>Auth: authenticate()
+    CLI->>Core: CredentialManager.add(args, opts)
+    Core->>Core: unlock() (cache hit, or raises PasswordRequired)
+    Core->>Auth: authenticate(password)
     Auth->>Vault: unlock() / unlock_with_dek()
     Vault-->>Auth: (DEK, document)
-    Auth-->>CLI: (DEK, document, vault)
-    CLI->>Schema: get_schema(vault.schema_name)
-    CLI->>Schema: cmd_add(document, args, opts, config)
-    Schema-->>CLI: mutated (bool)
+    Auth-->>Core: (DEK, document, vault)
+    Core->>Schema: get_schema(vault.schema_name)
+    Core->>Schema: cmd_add(document, args, opts, config)
+    Schema-->>Core: CommandResult(mutated, lines, ...)
     alt mutated is True
-        CLI->>Vault: save(document, DEK)
+        Core->>Vault: save(document, DEK)
         Vault->>Schema: serialize(document)
         Vault-->>U: vault.json re-encrypted and written
-    else mutated is False
-        CLI-->>U: no write
     end
+    Core-->>CLI: CommandResult
+    CLI-->>U: rendered via cli/ui.py
 ```
 
 Setup commands (`init`, `passwd`, `migrate`, `config`, `vault ...`) skip
-the schema-dispatch step and operate on the vault or config directly.
+the schema-dispatch step and operate on the vault or config directly, via
+their own `CredentialManager` methods.
 
 ## Setup & configuration
 
@@ -70,7 +75,7 @@ details.
 | Command | Description |
 |---|---|
 | `credmgr list` | List all stored entries in the *active* vault |
-| `credmgr list-all` | List every service and userid under it *(credentials schema)*, or every key/LHS *(env schema)* — across **every vault on disk**, not just the active one. Prompts for each vault's master password in turn (`*` marks the active vault, same as `vault list`) |
+| `credmgr list-all` | List every service and userid under it *(credentials schema)*, or every key *(env schema)* — across **every vault on disk**, not just the active one. Prompts for each vault's master password in turn (`*` marks the active vault, same as `vault list`) |
 | `credmgr get <service> [userid]` | Display credentials in a table |
 | `credmgr search <query>` | Fuzzy search across entries |
 | `credmgr copy <service> [userid]` | Copy a value to the clipboard (auto-clears) |
@@ -78,6 +83,7 @@ details.
 | `credmgr update <service> <userid> userid <new_userid>` | Rename an account's userid *(credentials schema)* |
 | `credmgr update <service> <userid> password [--generate] [--passphrase]` | Change password, old one kept in history *(credentials schema)* |
 | `credmgr update <service> <userid> notes "<text>"` | Update notes *(credentials schema)* |
+| `credmgr update <service> <userid> account <new_userid> [--generate] [--passphrase]` | Replace both userid and password in one step, old password kept in history *(credentials schema)* |
 | `credmgr update <KEY> <VALUE>` | Update a value *(env schema)* |
 | `credmgr history <service> <userid>` | Show password history for an account *(credentials schema only)* |
 | `credmgr delete <service> [userid]` | Delete an account, or a whole service if no userid given |

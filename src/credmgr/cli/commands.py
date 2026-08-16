@@ -1,10 +1,13 @@
 """Command-line interface: Typer argument parsing and command dispatch.
 
-Generic commands (add/update/delete/list/get/search/copy/history/audit/
-import/export) hold no schema-specific logic -- they collect arguments
-and option flags and hand them to the active vault's schema
-(credmgr/schemas/) to do the actual work, so new schemas can be added
-without touching this file.
+This is a thin frontend over credmgr.core.CredentialManager: every
+command here does argument parsing, calls CredentialManager, and renders
+(or prompts for) whatever it needs -- it holds no application logic
+of its own. Generic commands (add/update/delete/list/get/search/copy/
+history/audit/import/export) also hold no schema-specific logic;
+CredentialManager dispatches those to the active vault's schema
+(credmgr/schemas/), so new schemas can be added without touching this
+file.
 """
 
 from __future__ import annotations
@@ -13,55 +16,58 @@ from typing import List, Optional
 
 import typer
 
-from . import datasources
-from . import globalindex
-from . import vaultmgr
-from .config import (ARGON2_MAX_MEMORY_COST, ARGON2_MIN_MEMORY_COST, ARGON2_MIN_PARALLELISM,
+from ..core import (AuthenticationError, BackendUnavailableError,
+                     CredentialManager, PasswordRequired, SchemaError,
+                     SecretRequired, UnknownBackendError,
+                     UnknownSchemaError, VaultError, VaultNotFound)
+from ..config import (ARGON2_MAX_MEMORY_COST, ARGON2_MIN_MEMORY_COST, ARGON2_MIN_PARALLELISM,
                      ARGON2_MIN_TIME_COST, config)
-from .crypto import BackendUnavailableError, UnknownBackendError
-from .crypto.registry import available_backends, get_backend, resolve_backend
-from .generator import generate_passphrase, generate_password
-from .schemas import SchemaError, UnknownSchemaError, all_schemas, get_schema
-from .ui import ask_choice, ask_int, console, fatal, safe_getpass
-from .vault import AuthenticationError, Vault, VaultError
+from ..crypto.registry import available_backends, get_backend, resolve_backend
+from ..schemas import all_schemas, get_schema
+from ..vaultmgr import VaultManagerError, validate_vault_name
+from . import ui
+from .ui import ask_choice, ask_int, console, fatal, prompt_new_password, safe_getpass
+
+manager = CredentialManager(config)
 
 ''' ------------------------------ HELPERS ------------------------------ '''
 
-def _load_authenticated():
-    """Ensure the active vault exists and authenticate against it. Used by
-    every command that operates on stored vault contents. Returns
-    (dek, document, vault, schema)."""
-    if not Vault(config).exists():
-        fatal(
-            f"No vault found for the active vault '{config.active_vault}'. "
-            f"Run 'credmgr init' (if this is your first vault) or "
-            f"'credmgr vault create {config.active_vault} --schema <name>' first."
-        )
+def _call(fn, *args, opts: dict | None = None, **kwargs):
+    """Call a CredentialManager method, prompting on the terminal for whatever it
+    says it needs (the vault's master password, and/or -- for write
+    commands -- a new secret value to store) and retrying, until it
+    succeeds or a real error surfaces. Turns SchemaError/VaultError/
+    friends into a clean CLI error instead of a traceback.
 
-    from .auth import authenticate  # local import: avoids a circular import at load time
-
-    dek, document, vault = authenticate()
-    schema = get_schema(vault.schema_name)
-    return dek, document, vault, schema
-
-def _save_if_mutated(vault: Vault, document, dek: bytes, mutated: bool) -> None:
-    if mutated:
-        try:
-            vault.save(document, dek)
-        except VaultError as e:
-            fatal(str(e))
-        # The document just saved is already decrypted in memory, so the
-        # cross-vault search index (credmgr/globalindex.py) can be kept
-        # in sync for free -- no extra unlock, no extra vault read.
-        globalindex.update_vault(config, vault.name, vault.schema_name, document)
-
-def _dispatch(fn, *args):
-    """Call a schema cmd_* method, turning SchemaError into a clean CLI
-    error instead of a traceback."""
+    `opts`, when given, is threaded through as the final positional
+    argument (matching every schema.cmd_add/cmd_update signature) so it
+    can be updated in place across a SecretRequired retry.
+    """
+    call_args = args if opts is None else (*args, opts)
     try:
-        return fn(*args)
-    except SchemaError as e:
+        while True:
+            try:
+                return fn(*call_args, **kwargs)
+            except PasswordRequired as e:
+                kwargs["password"] = safe_getpass(e.prompt)
+            except SecretRequired:
+                opts = {**opts, "password": prompt_new_password()}
+                call_args = (*args, opts)
+    except (SchemaError, VaultError, AuthenticationError, BackendUnavailableError,
+            UnknownBackendError, VaultManagerError, VaultNotFound) as e:
         fatal(str(e))
+
+def _load_vault_not_found_message(name: str) -> str:
+    if name == config.active_vault:
+        return (
+            f"No vault found for the active vault '{name}'. "
+            f"Run 'credmgr init' (if this is your first vault) or "
+            f"'credmgr vault create {name} --schema <name>' first."
+        )
+    return f"No vault found for '{name}'. Run 'credmgr init' first."
+
+def _render(result) -> None:
+    ui.render_result(result)
 
 ''' ------------------------------ COMMANDS: SETUP ------------------------------ '''
 
@@ -107,25 +113,22 @@ def _choose_backend_interactively() -> str:
     console.print(f"Selected: [bold green]{get_backend(backend_name).algorithm}[/] ({backend_name})")
     return backend_name
 
-def _resolve_backend_noninteractive(backend: str | None) -> str:
-    if backend:
+def _resolve_backend_noninteractive(backend_name: str | None) -> str:
+    if backend_name:
         try:
-            get_backend(backend)
+            get_backend(backend_name)
         except (UnknownBackendError, BackendUnavailableError) as e:
             fatal(str(e))
-        console.print(f"Using backend: [bold green]{get_backend(backend).algorithm}[/] ({backend})")
-        return backend
+        console.print(f"Using backend: [bold green]{get_backend(backend_name).algorithm}[/] ({backend_name})")
+        return backend_name
     return _choose_backend_interactively()
 
-def cmd_init(skip_data_fetch: bool = False, backend: str | None = None) -> None:
-    vault = Vault(config)  # the active vault -- "default" on a brand-new install
-
-    if vault.exists():
+def cmd_init(skip_data_fetch: bool = False, backend_name: str | None = None) -> None:
+    if manager.vault_exists():
         console.print("Vault already initialized.", style="bold blue")
         return
 
-    backend = _resolve_backend_noninteractive(backend)
-    config.backend = backend
+    backend_name = _resolve_backend_noninteractive(backend_name)
 
     console.print("\nSet parameters for the Argon2 key derivation function:", style="bold magenta")
     console.print(
@@ -138,87 +141,85 @@ def cmd_init(skip_data_fetch: bool = False, backend: str | None = None) -> None:
 
     advanced = ask_choice("\nConfigure Argon2 parameters manually?", ["y", "n"], "n")
 
+    argon2_time_cost = argon2_memory_cost = argon2_parallelism = None
     if advanced == "y":
-        config.argon2_time_cost = ask_int(
+        argon2_time_cost = ask_int(
             "Argon2 time cost",
             default=config.argon2_time_cost,
             min_value=ARGON2_MIN_TIME_COST,
             max_value=20
         )
-
-        config.argon2_memory_cost = ask_int(
+        argon2_memory_cost = ask_int(
             "Argon2 memory cost (KiB)",
             default=config.argon2_memory_cost,
             min_value=ARGON2_MIN_MEMORY_COST,
             max_value=ARGON2_MAX_MEMORY_COST
         )
-
-        config.argon2_parallelism = ask_int(
+        argon2_parallelism = ask_int(
             "Argon2 parallelism",
             default=config.argon2_parallelism,
             min_value=ARGON2_MIN_PARALLELISM,
             max_value=16
         )
-
         console.print("\nSelected Argon2 parameters:", style="bold green")
     else:
         console.print("\nUsing secure defaults:", style="bold green")
 
-    console.print(f"  Time cost   : {config.argon2_time_cost}")
-    console.print(f"  Memory cost : {config.argon2_memory_cost:,} KiB")
-    console.print(f"  Parallelism : {config.argon2_parallelism}")
-    console.print(f"  Key length  : {config.argon2_hash_len} bytes")
-    console.print()
-
     console.print("Setting up a new credential vault.", style="bold cyan")
     master = safe_getpass("Set master password: ")
     confirm = safe_getpass("Confirm master password: ")
-
     if master != confirm:
         fatal("Passwords do not match.")
 
-    console.print("Deriving key (this takes a moment)…", style="bold yellow")
-    vault.create(backend, master, "credentials")
-    globalindex.update_vault(config, vault.name, "credentials", get_schema("credentials").new_document())
+    console.print("Deriving key (this takes a moment)\u2026", style="bold yellow")
 
+    if not skip_data_fetch:
+        console.print(f"Fetching security datasets into {config.data_dir} \u2026", style="bold cyan")
+
+    result = _call(
+        manager.init_vault, master, backend_name,
+        argon2_time_cost=argon2_time_cost, argon2_memory_cost=argon2_memory_cost,
+        argon2_parallelism=argon2_parallelism, skip_data_fetch=skip_data_fetch,
+    )
+
+    console.print(f"  Time cost   : {result.argon2_time_cost}")
+    console.print(f"  Memory cost : {result.argon2_memory_cost:,} KiB")
+    console.print(f"  Parallelism : {result.argon2_parallelism}")
+    console.print(f"  Key length  : {result.argon2_hash_len} bytes")
+    console.print()
     console.print("Vault created and master password set.", style="bold green")
 
-    if skip_data_fetch:
+    if result.fetch_results is None:
         console.print(f"Skipped fetching security datasets into {config.data_dir}.", style="dim")
     else:
-        console.print(f"Fetching security datasets into {config.data_dir} …", style="bold cyan")
-        results = datasources.fetch_all(config)
-        _report_fetch_results(results)
-
-    config.save()
+        _report_fetch_results(result.fetch_results)
 
     console.print("Use 'add' to start storing credentials securely.", style="bold magenta")
 
 def cmd_fetch_data() -> None:
     """(Re-)download the wordlist, common-passwords, sequences, and
     breached-hash datasets into <master_dir>/data/. Safe to re-run any
-    time -- e.g. to retry after a failed `init`, or to refresh the data."""
-    console.print(f"Fetching security datasets into {config.data_dir} …", style="bold cyan")
-    results = datasources.fetch_all(config)
+    time -- e.g. to retry after a failed `init`, or to refresh the data.
+    """
+    console.print(f"Fetching security datasets into {config.data_dir} \u2026", style="bold cyan")
+    results = manager.fetch_data()
     _report_fetch_results(results)
 
 def cmd_passwd() -> None:
     """Rotate the active vault's master password. Only the DEK is
     re-wrapped -- the (potentially large) vault contents are never
     re-encrypted."""
-    vault = Vault(config)
-    if not vault.exists():
-        fatal(f"No vault found for '{config.active_vault}'. Run 'credmgr init' first.")
+    if not manager.vault_exists():
+        fatal(_load_vault_not_found_message(config.active_vault))
 
     old = safe_getpass("Current master password: ")
     new = safe_getpass("New master password: ")
     confirm = safe_getpass("Confirm new master password: ")
-
     if new != confirm:
         fatal("New passwords do not match.")
 
     try:
-        vault.rotate_master_password(old, new)
+        manager.change_password(old, new)
     except (AuthenticationError, BackendUnavailableError, VaultError) as e:
         fatal(str(e))
 
@@ -230,12 +231,10 @@ def cmd_migrate(new_backend: str | None) -> None:
     Backend selection follows CLI > environment (CREDMGR_BACKEND) > config
     file > built-in default, same as everywhere else backends are chosen.
     """
-    vault = Vault(config)
-    if not vault.exists():
-        fatal(f"No vault found for '{config.active_vault}'. Run 'credmgr init' first.")
+    if not manager.vault_exists():
+        fatal(_load_vault_not_found_message(config.active_vault))
 
     target = resolve_backend(cli_value=new_backend, config_value=config.backend)
-
     try:
         get_backend(target)  # fail fast, before prompting for the password
     except (UnknownBackendError, BackendUnavailableError) as e:
@@ -244,39 +243,22 @@ def cmd_migrate(new_backend: str | None) -> None:
     master = safe_getpass("Master password: ")
 
     try:
-        vault.migrate_backend(master, target)
+        resolved = manager.migrate_backend(master, target)
     except (AuthenticationError, BackendUnavailableError, VaultError) as e:
         fatal(str(e))
 
-    # Update "backend" value in config
-    if config.backend != target:
-        config.backend = target
-        config.save()
-
-    # The DEK changed, so any cached session key is now stale.
-    from .auth import delete_cache, session_cache_paths  # local import: avoids a circular import at load time
-    delete_cache(session_cache_paths())
-
-    console.print(f"Vault migrated to backend '[bold green]{target}[/]' ({get_backend(target).algorithm}).", style="bold green")
+    console.print(f"Vault migrated to backend '[bold green]{resolved}[/]' ({get_backend(resolved).algorithm}).", style="bold green")
 
 def cmd_config_show() -> None:
-    for key, value in config.as_dict().items():
+    for key, value in manager.config_show().items():
         colour = "red" if key in config.immutable_parameters else "cyan"
         console.print(f"  [bold {colour}]{key}[/bold {colour}] = [white]{value}[/white]")
 
 def cmd_config_set(key: str, value: str) -> None:
-    if key in config.immutable_parameters and vaultmgr.list_vault_names(config):
-        fatal(
-            f"'{key}' is fixed once a vault exists. To use a different "
-            "backend, run 'credmgr migrate --backend <n>'. To change the "
-            "Argon2 work factor, create a new vault ('credmgr vault create') "
-            "and import data into it."
-        )
     try:
-        config.set_value(key, value)
+        manager.config_set(key, value)
     except (KeyError, ValueError) as e:
         fatal(str(e))
-    config.save()
     console.print(f"Set [bold cyan]{key}[/bold cyan] = [white]{getattr(config, key)}[/white]", style="bold green")
 
 def cmd_config_reset() -> None:
@@ -284,34 +266,24 @@ def cmd_config_reset() -> None:
     if confirm != "y":
         print("Aborted.")
         return
-    if config.settings_file.exists():
-        config.settings_file.unlink()
+    manager.config_reset()
     console.print("Configuration reset to defaults.", style="bold green")
 
 def cmd_generate(passphrase: bool, length: int, words: int) -> str:
-    if length < 8:
-        fatal("Password length must be at least 8.")
-    if length > 256:
-        fatal("Password length must be 256 characters or fewer.")
-    if words < 3 or words > 12:
-        fatal("Passphrase word count must be between 3 and 12.")
-
-    if passphrase:
-        value = generate_passphrase(words)
-        label = "Passphrase"
-    else:
-        value = generate_password(length)
-        label = "Password"
-
+    try:
+        value = manager.generate_secret(passphrase=passphrase, length=length, words=words)
+    except ValueError as e:
+        fatal(str(e))
+    label = "Passphrase" if passphrase else "Password"
     console.print(f"\n  [bold cyan]{label}:[/bold cyan]  [bold white]{value}[/bold white]")
     return value
 
 ''' ------------------------------ COMMANDS: VAULT MANAGEMENT ------------------------------ '''
 
-def cmd_vault_create(name: str, schema_name: str, backend: str | None) -> None:
+def cmd_vault_create(name: str, schema_name: str, backend_name: str | None) -> None:
     try:
-        vaultmgr.validate_vault_name(name)
-    except vaultmgr.VaultManagerError as e:
+        validate_vault_name(name)
+    except VaultManagerError as e:
         fatal(str(e))
 
     try:
@@ -319,63 +291,58 @@ def cmd_vault_create(name: str, schema_name: str, backend: str | None) -> None:
     except UnknownSchemaError as e:
         fatal(str(e))
 
-    vault = Vault(config, name=name)
-    if vault.exists():
+    if manager.vault_exists(name):
         fatal(f"Vault '{name}' already exists.")
 
-    backend = _resolve_backend_noninteractive(backend) if backend else resolve_backend(config_value=config.backend)
+    backend_name = _resolve_backend_noninteractive(backend_name) if backend_name else resolve_backend(config_value=config.backend)
     try:
-        get_backend(backend)
+        get_backend(backend_name)
     except (UnknownBackendError, BackendUnavailableError) as e:
         fatal(str(e))
 
-    console.print(f"Creating vault '[bold cyan]{name}[/bold cyan]' (schema: {schema_name}, backend: {backend})", style="bold cyan")
+    console.print(f"Creating vault '[bold cyan]{name}[/bold cyan]' (schema: {schema_name}, backend: {backend_name})", style="bold cyan")
     master = safe_getpass("Set master password: ")
     confirm = safe_getpass("Confirm master password: ")
     if master != confirm:
         fatal("Passwords do not match.")
 
-    console.print("Deriving key (this takes a moment)…", style="bold yellow")
+    console.print("Deriving key (this takes a moment)\u2026", style="bold yellow")
     try:
-        vault.create(backend, master, schema_name)
+        manager.vault_create(name, schema_name, backend_name, master)
     except VaultError as e:
         fatal(str(e))
-    globalindex.update_vault(config, name, schema_name, get_schema(schema_name).new_document())
 
     console.print(f"Vault '{name}' created.", style="bold green")
 
 def cmd_vault_list() -> None:
-    names = vaultmgr.list_vault_names(config)
-    if not names:
+    vaults = manager.vault_list()
+    if not vaults:
         console.print("No vaults found. Run 'credmgr vault create <name>' to make one.", style="bold yellow")
         return
-
-    for name in names:
-        schema_name = vaultmgr.peek_schema(config, name)
-        if name == config.active_vault:
-            console.print(f"* [bold green]{name}[/bold green] ({schema_name})")
+    for v in vaults:
+        if v.active:
+            console.print(f"* [bold green]{v.name}[/bold green] ({v.schema})")
         else:
-            console.print(f"  {name} ({schema_name})")
+            console.print(f"  {v.name} ({v.schema})")
 
 def cmd_vault_current() -> None:
-    console.print(config.active_vault, style="bold cyan")
+    console.print(manager.vault_current(), style="bold cyan")
 
 def cmd_vault_use(name: str) -> None:
-    if not vaultmgr.vault_exists(config, name):
-        fatal(f"Vault '{name}' does not exist. Run 'credmgr vault create {name}' first.")
-
     if name == config.active_vault:
+        if not manager.vault_exists(name):
+            fatal(f"Vault '{name}' does not exist. Run 'credmgr vault create {name}' first.")
         console.print(f"'{name}' is already the active vault.", style="bold blue")
         return
-
-    config.active_vault = name
-    config.save()
+    try:
+        manager.vault_use(name)
+    except VaultNotFound:
+        fatal(f"Vault '{name}' does not exist. Run 'credmgr vault create {name}' first.")
     console.print(f"Active vault switched to '[bold green]{name}[/bold green]'.", style="bold green")
 
 def cmd_vault_delete(name: str) -> None:
-    if not vaultmgr.vault_exists(config, name):
+    if not manager.vault_exists(name):
         fatal(f"Vault '{name}' does not exist.")
-
     if name == config.active_vault:
         fatal("Cannot delete the active vault. Switch to another vault first with 'credmgr vault use <name>'.")
 
@@ -385,11 +352,9 @@ def cmd_vault_delete(name: str) -> None:
         return
 
     try:
-        vaultmgr.delete_vault(config, name)
-    except vaultmgr.VaultManagerError as e:
+        manager.vault_delete(name)
+    except VaultManagerError as e:
         fatal(str(e))
-    globalindex.remove_vault(config, name)
-
     console.print(f"Vault '{name}' deleted.", style="bold red")
 
 ''' ------------------------------ CLI (Typer) ------------------------------ '''
@@ -415,12 +380,12 @@ def init_cmd(
         False, "--skip-data-fetch",
         help="Don't download the wordlist/common-passwords/breach-hash datasets; use built-in defaults",
     ),
-    backend: Optional[str] = typer.Option(
+    backend_name: Optional[str] = typer.Option(
         None, "--backend", metavar="NAME",
         help="Crypto backend to use (skips the interactive prompt); see 'credmgr config show'",
     )
 ) -> None:
-    cmd_init(skip_data_fetch=skip_data_fetch, backend=backend)
+    cmd_init(skip_data_fetch=skip_data_fetch, backend_name=backend_name)
 
 @app.command(name="fetch-data", help="(Re-)download the wordlist, common-passwords, sequences, and breached-hash datasets")
 def fetch_data_cmd() -> None:
@@ -432,12 +397,12 @@ def passwd_cmd() -> None:
 
 @app.command(name="migrate", help="Re-encrypt the vault under a different crypto backend")
 def migrate_cmd(
-    backend: Optional[str] = typer.Option(
+    backend_name: Optional[str] = typer.Option(
         None, "--backend", metavar="NAME",
         help="Target backend name (default: env CREDMGR_BACKEND, then config, then built-in default)",
     )
 ) -> None:
-    cmd_migrate(backend)
+    cmd_migrate(backend_name)
 
 @app.command(name="generate", help="Generate a random password or passphrase")
 def generate_cmd(
@@ -475,9 +440,9 @@ def vault_create_cmd(
         "credentials", "--schema", metavar="NAME",
         help=f"Schema for the new vault's contents ({', '.join(sorted(all_schemas())) or 'none registered'})"
     ),
-    backend: Optional[str] = typer.Option(None, "--backend", metavar="NAME", help="Crypto backend to use (skips the interactive prompt)")
+    backend_name: Optional[str] = typer.Option(None, "--backend", metavar="NAME", help="Crypto backend to use (skips the interactive prompt)")
 ) -> None:
-    cmd_vault_create(name, schema, backend)
+    cmd_vault_create(name, schema, backend_name)
 
 @vault_app.command(name="list", help="List all vaults")
 def vault_list_cmd() -> None:
@@ -499,30 +464,28 @@ def vault_delete_cmd(name: str) -> None:
 
 @app.command(name="list", help="List all entries in the active vault")
 def list_cmd() -> None:
-    _, document, _, schema = _load_authenticated()
-    _dispatch(schema.cmd_list, document, [], config)
+    if not manager.vault_exists():
+        fatal(_load_vault_not_found_message(config.active_vault))
+    _render(_call(manager.list_entries, password=None))
 
 def cmd_list_all() -> None:
     """Walk every vault on disk (not just the active one), authenticating
     against each in turn, and print its schema-shaped listing: every
-    service + userid under it (credentials), or every key/LHS (env)."""
-    names = vaultmgr.list_vault_names(config)
+    service + userid under it (credentials), or every key (env)."""
+    names = manager.vault_names()
     if not names:
         console.print("No vaults found. Run 'credmgr vault create <name>' to make one.", style="bold yellow")
         return
 
-    from .auth import authenticate  # local import: avoids a circular import at load time
-
     for i, name in enumerate(names):
         if i:
             console.print()
-        schema_name = vaultmgr.peek_schema(config, name)
+        schema_name = manager.peek_schema(name)
         marker = "*" if name == config.active_vault else " "
         console.print(f"{marker} [bold cyan]{name}[/bold cyan] ({schema_name})")
 
-        _, document, vault = authenticate(vault_name=name, prompt=f"Master password for vault '{name}': ")
-        schema = get_schema(vault.schema_name)
-        _dispatch(schema.cmd_list_all, document, config)
+        result = _call(manager.list_all_for_vault, name, password=None)
+        _render(result)
 
 @app.command(name="list-all", help="List services/userids (credentials) or keys (env) across every vault, not just the active one")
 def list_all_cmd() -> None:
@@ -534,25 +497,18 @@ def _ensure_index_fresh(names: list) -> None:
     """Bring the metadata index up to date before a global search.
 
     Prunes vaults that no longer exist, then re-derives metadata only
-    for vaults `globalindex.stale_vault_names` flags as out of sync
-    (missing from the index, changed on disk, or hand-edited). Vaults
-    that are already up to date are never touched or unlocked -- this is
-    what keeps `global` fast even with many vaults.
+    for vaults CredentialManager flags as out of sync (missing from the
+    index, changed on disk, or hand-edited). Vaults that are already up
+    to date are never touched or unlocked -- this is what keeps `global`
+    fast even with many vaults.
     """
-    globalindex.prune_removed_vaults(config, names)
-    stale = globalindex.stale_vault_names(config, names)
+    stale = manager.stale_index_vaults()
     if not stale:
         return
 
-    from .auth import authenticate  # local import: avoids a circular import at load time
-
-    console.print("Refreshing the search index for out-of-date vaults…", style="dim")
+    console.print("Refreshing the search index for out-of-date vaults\u2026", style="dim")
     for name in stale:
-        _, document, vault = authenticate(
-            vault_name=name,
-            prompt=f"Master password for vault '{name}' (index refresh): "
-        )
-        globalindex.update_vault(config, name, vault.schema_name, document)
+        _call(manager.refresh_vault_index, name, password=None)
 
 def _render_match_row(index: int, match: dict) -> str:
     fields = "  ".join(value for _label, value in match["summary"])
@@ -572,13 +528,13 @@ def cmd_global(query: str) -> None:
     if not query:
         fatal("Usage: credmgr global <query>")
 
-    names = vaultmgr.list_vault_names(config)
+    names = manager.vault_names()
     if not names:
         console.print("No vaults found. Run 'credmgr vault create <name>' to make one.", style="bold yellow")
         return
 
     _ensure_index_fresh(names)
-    matches = globalindex.search(config, query)
+    matches = manager.index_search(query)
 
     if not matches:
         console.print("No matching entries found.", style="bold yellow")
@@ -606,16 +562,10 @@ def cmd_global(query: str) -> None:
             return
         match = matches[int(raw) - 1]
 
-    from .auth import authenticate  # local import: avoids a circular import at load time
-
     # Only the selected vault is ever unlocked; the active vault (and
     # every other vault) is left completely untouched.
-    _, document, vault = authenticate(
-        vault_name=match["vault"],
-        prompt=f"Password for vault \"{match['vault']}\": "
-    )
-    schema = get_schema(vault.schema_name)
-    _dispatch(schema.cmd_get, document, match["args"], config)
+    result = _call(manager.get_from_vault, match["vault"], match["args"], password=None)
+    _render(result)
 
 @app.command(name="global", help="Search for an entry across every vault via the metadata index, then unlock only the matching vault")
 def global_cmd(query: str) -> None:
@@ -623,28 +573,52 @@ def global_cmd(query: str) -> None:
 
 @app.command(name="audit", help="Run a password health audit (credentials schema only)")
 def audit_cmd() -> None:
-    _, document, _, schema = _load_authenticated()
-    _dispatch(schema.cmd_audit, document, config)
+    if not manager.vault_exists():
+        fatal(_load_vault_not_found_message(config.active_vault))
+    _render(_call(manager.audit, password=None))
 
 @app.command(name="get", help="Display stored entries; args are schema-specific, e.g. <service> [userid]")
 def get_cmd(args: Optional[List[str]] = typer.Argument(None)) -> None:
-    _, document, _, schema = _load_authenticated()
-    _dispatch(schema.cmd_get, document, args or [], config)
+    if not manager.vault_exists():
+        fatal(_load_vault_not_found_message(config.active_vault))
+    _render(_call(manager.get, args or [], password=None))
 
 @app.command(name="search", help="Search entries")
 def search_cmd(query: str) -> None:
-    _, document, _, schema = _load_authenticated()
-    _dispatch(schema.cmd_search, document, query, config)
+    if not manager.vault_exists():
+        fatal(_load_vault_not_found_message(config.active_vault))
+    _render(_call(manager.search, query, password=None))
 
 @app.command(name="copy", help="Copy a stored value to the clipboard; args are schema-specific")
 def copy_cmd(args: Optional[List[str]] = typer.Argument(None)) -> None:
-    _, document, _, schema = _load_authenticated()
-    _dispatch(schema.cmd_copy, document, args or [], config)
+    if not manager.vault_exists():
+        fatal(_load_vault_not_found_message(config.active_vault))
+    args = list(args or [])
+    result = _call(manager.copy, args, password=None)
+
+    while result.choices:
+        _render(result)
+        console.print()
+        for i, choice in enumerate(result.choices, start=1):
+            console.print(f"  {i}. {choice}")
+        try:
+            raw = input("Select an account: ").strip()
+        except KeyboardInterrupt:
+            print()
+            return
+        if not raw.isdigit() or not (1 <= int(raw) <= len(result.choices)):
+            console.print("Invalid selection.", style="bold red")
+            return
+        args = [args[0], result.choices[int(raw) - 1]]
+        result = _call(manager.copy, args, password=None)
+
+    _render(result)
 
 @app.command(name="history", help="Show change history for an entry (credentials schema only)")
 def history_cmd(args: List[str] = typer.Argument(...)) -> None:
-    _, document, _, schema = _load_authenticated()
-    _dispatch(schema.cmd_history, document, args, config)
+    if not manager.vault_exists():
+        fatal(_load_vault_not_found_message(config.active_vault))
+    _render(_call(manager.history, args, password=None))
 
 ''' -------- write commands (vault + auth required, may persist) -------- '''
 
@@ -657,10 +631,10 @@ def add_cmd(
     words: int = typer.Option(config.passphrase_num_word, "--words", metavar="N"),
     notes: str = typer.Option("", "--notes", "-n", metavar="TEXT")
 ) -> None:
-    dek, document, vault, schema = _load_authenticated()
+    if not manager.vault_exists():
+        fatal(_load_vault_not_found_message(config.active_vault))
     opts = {"generate": generate, "passphrase": passphrase, "length": length, "words": words, "notes": notes}
-    mutated = _dispatch(schema.cmd_add, document, args, opts, config)
-    _save_if_mutated(vault, document, dek, mutated)
+    _render(_call(manager.add, args, opts=opts, password=None))
 
 @app.command(name="update", help="Update an existing entry; args are schema-specific, e.g. <service> <userid> <field> [new_value] or <KEY> <VALUE>")
 def update_cmd(
@@ -670,33 +644,40 @@ def update_cmd(
     length: int = typer.Option(config.password_length, "--length", metavar="N"),
     words: int = typer.Option(config.passphrase_num_word, "--words", metavar="N")
 ) -> None:
-    dek, document, vault, schema = _load_authenticated()
+    if not manager.vault_exists():
+        fatal(_load_vault_not_found_message(config.active_vault))
     opts = {"generate": generate, "passphrase": passphrase, "length": length, "words": words}
-    mutated = _dispatch(schema.cmd_update, document, args, opts, config)
-    _save_if_mutated(vault, document, dek, mutated)
+    _render(_call(manager.update, args, opts=opts, password=None))
 
 @app.command(name="delete", help="Delete an entry; args are schema-specific, e.g. <service> [userid] or <KEY>")
 def delete_cmd(args: List[str] = typer.Argument(...)) -> None:
-    dek, document, vault, schema = _load_authenticated()
-    mutated = _dispatch(schema.cmd_delete, document, args, config)
-    _save_if_mutated(vault, document, dek, mutated)
+    if not manager.vault_exists():
+        fatal(_load_vault_not_found_message(config.active_vault))
+    args = list(args)
+    result = _call(manager.delete, args, password=None)
+
+    if result.needs_confirmation:
+        _render(result)
+        confirm = ask_choice("Proceed?", ["y", "n"], "n")
+        if confirm != "y":
+            print("Aborted.")
+            return
+        result = _call(manager.delete, args, password=None, confirmed=True)
+
+    _render(result)
 
 @app.command(name="import", help="Import entries from a file")
 def import_cmd(filepath: str) -> None:
-    dek, document, vault, schema = _load_authenticated()
-    mutated = _dispatch(schema.cmd_import, document, filepath, config)
-    _save_if_mutated(vault, document, dek, mutated)
+    if not manager.vault_exists():
+        fatal(_load_vault_not_found_message(config.active_vault))
+    _render(_call(manager.import_entries, filepath, password=None))
 
 @app.command(name="export", help="Print all entries in the active vault")
 def export_cmd() -> None:
-    if not Vault(config).exists():
-        fatal(f"No vault found for '{config.active_vault}'. Run 'credmgr init' first.")
-
-    # Always re-authenticate for export, regardless of any cached session.
-    from .auth import authenticate
-    _, fresh_document, vault = authenticate(fresh=True)
-    schema = get_schema(vault.schema_name)
-    _dispatch(schema.cmd_export, fresh_document, config)
+    if not manager.vault_exists():
+        fatal(_load_vault_not_found_message(config.active_vault))
+    result = _call(manager.export, password=None)
+    print(result.raw)
 
 def main() -> None:
     app()

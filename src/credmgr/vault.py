@@ -1,9 +1,9 @@
-"""Versioned, envelope-encrypted vault storage.
+"""Vault Format v1: envelope-encrypted vault storage.
 
 On-disk layout:
 
     {
-        "version": 2,
+        "version": 1,
         "schema": "credentials",
         "kdf": {...},
         "backend": "aesgcm-cryptography",
@@ -22,12 +22,11 @@ knows nothing about that document's shape -- it only exchanges raw
 plaintext bytes with the schema registry -- which keeps the vault format
 independent of what's actually stored in it.
 
-`version` lets future releases change this layout without breaking
-existing vaults: add an entry to MIGRATIONS and bump CURRENT_VERSION;
-`_migrate()` walks old vaults forward automatically. Changing which
-*backend* encrypts an existing vault is a separate, explicit operation
-(`migrate_backend()`), since it requires the master password to
-re-encrypt data, not just reshape metadata.
+`version` identifies this on-disk layout (currently `CURRENT_VERSION`,
+Vault Format v1); a future format change would add version-migration
+machinery here. Changing which *backend* encrypts an existing vault is a
+separate, explicit operation (`migrate_backend()`), since it requires
+the master password to re-encrypt data, not just reshape metadata.
 
 Each vault is a self-contained directory under
 <master_dir>/vaults/<name>/; `Vault(config, name=...)` operates on one
@@ -41,12 +40,12 @@ import json
 import os
 import shutil
 
-from .crypto import BackendUnavailableError, CryptoError, get_backend
-from .crypto.envelope import (KDFParams, b64d, b64e, decrypt_blob, derive_kek,
+from .crypto import BackendUnavailableError, get_backend
+from .crypto.envelope import (KDFParams, decrypt_blob, derive_kek,
                                 encrypt_blob, generate_dek, unwrap_dek, wrap_dek)
 from .schemas import get_schema
 
-CURRENT_VERSION = 2
+CURRENT_VERSION = 1
 DEFAULT_SCHEMA = "credentials"
 
 class VaultError(Exception):
@@ -55,59 +54,19 @@ class VaultError(Exception):
 class AuthenticationError(VaultError):
     pass
 
-# Pre-plugin-architecture (v1) vaults identified the cipher by these short
-# names instead of a registered backend name, and stored each blob as a
-# separate {"nonce": ..., "ciphertext": ...} pair instead of one combined
-# ciphertext. Both are purely structural differences -- no decryption is
-# needed to move a vault from v1 to v2.
-_V1_CIPHER_TO_BACKEND = {
-    "aes256gcm": "aesgcm-cryptography",
-    "xchacha20poly1305": "xchacha-pynacl"
-}
+def _validate_version(raw: dict) -> dict:
+    """Reject a vault written by a newer, incompatible format version.
 
-def _combine_blob(blob: dict) -> dict:
-    """v1 stored nonce and ciphertext separately; v2 backends return (and
-    expect) a single concatenated blob. Concatenating bytes is not a crypto
-    operation, so this needs no key and can't fail authentication."""
-    nonce = b64d(blob["nonce"])
-    ciphertext = b64d(blob["ciphertext"])
-    return {"ciphertext": b64e(nonce + ciphertext)}
-
-def _migrate_v1_to_v2(raw: dict) -> dict:
-    old_cipher = raw["cipher"]
-    backend_name = _V1_CIPHER_TO_BACKEND.get(old_cipher, old_cipher)
-
-    raw["version"] = 2
-    raw["backend"] = backend_name
-    try:
-        raw["algorithm"] = get_backend(backend_name).algorithm
-    except CryptoError:
-        # Backend not installed right now -- still a valid v2 vault; the
-        # algorithm label will be corrected the next time it's available.
-        raw["algorithm"] = old_cipher
-    raw["encrypted_key"] = _combine_blob(raw["encrypted_key"])
-    raw["vault"] = _combine_blob(raw["vault"])
-    del raw["cipher"]
-    # Pre-schema (v1) vaults predate schemas entirely; they were always
-    # what's now called the "credentials" schema.
-    raw["schema"] = DEFAULT_SCHEMA
-    return raw
-
-# old_version -> function(raw_dict) -> raw_dict (upgraded to old_version + 1)
-MIGRATIONS: dict = {1: _migrate_v1_to_v2}
-
-def _migrate(raw: dict) -> dict:
-    version = raw.get("version", 1)
-    while version in MIGRATIONS:
-        raw = MIGRATIONS[version](raw)
-        version = raw["version"]
-
+    There is currently only one on-disk format (Vault Format v1, see the
+    module docstring), so this is a sanity check rather than a migration
+    step; a future format change would add version-migration machinery
+    here instead of just checking the number.
+    """
+    version = raw.get("version", CURRENT_VERSION)
     if version != CURRENT_VERSION:
         raise VaultError(
             f"Vault version {version} is newer than the version this build of credmgr supports ({CURRENT_VERSION}). Please upgrade credmgr.")
 
-    # Belt-and-braces: any v2 vault written before schemas existed is a
-    # credentials vault in every way but name.
     raw.setdefault("schema", DEFAULT_SCHEMA)
     return raw
 
@@ -336,7 +295,7 @@ class Vault:
             shutil.copy2(self.vault_bak_file, self.vault_file)
             self.vault_file.chmod(0o600)
 
-        raw = _migrate(raw)
+        raw = _validate_version(raw)
         self._schema_name = raw["schema"]
         return raw
 

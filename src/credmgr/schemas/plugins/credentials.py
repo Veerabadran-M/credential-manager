@@ -1,9 +1,10 @@
 """Credentials schema: service/account/password/notes/history.
 
 credmgr's original data model, unchanged in behavior -- add/update/
-delete/list/get/search/copy/history/audit/import/export -- now
-implemented as a Schema plugin so vault.py and cli.py don't need to know
-its shape.
+delete/list/get/search/copy/history/audit/import/export -- implemented
+as a Schema plugin so vault.py and the application layer don't need to know its
+shape. Every cmd_* method here returns a CommandResult instead of
+printing or reading from the terminal; see schemas/base.py.
 """
 
 from __future__ import annotations
@@ -17,9 +18,8 @@ from ...generator import generate_passphrase, generate_password
 from ...models import Account, Credentials, PasswordHistoryEntry
 from ...search import (global_search, resolve_for_mutation, search_accounts,
                         search_services)
-from ...ui import console, prompt_new_password, render_get_results
 from ...validation import validate_text
-from ..base import IndexEntry, Schema, SchemaError
+from ..base import CommandResult, IndexEntry, Schema, SchemaError, SecretRequired, Table
 
 MAX_LABEL_LENGTH = 128
 MAX_QUERY_LENGTH = 512
@@ -42,6 +42,13 @@ def _push_history(acc: Account, history_limit: int) -> None:
     acc.history.insert(0, PasswordHistoryEntry(password=acc.password, changed_at=acc.updated_at))
     del acc.history[history_limit:]
 
+def _clipboard_lines(result: CommandResult, clip) -> None:
+    """Append a Line describing a copy_to_clipboard() outcome."""
+    if clip.copied:
+        result.say(f"{clip.label} copied to clipboard. Clears in {clip.timeout}s.", "bold green")
+    else:
+        result.say(f"{clip.label} was not copied ({clip.reason}).", "bold yellow")
+
 class CredentialsSchema(Schema):
     name = "credentials"
 
@@ -61,7 +68,12 @@ class CredentialsSchema(Schema):
 
     # ---- shared helpers ----
 
-    def _get_password(self, opts: dict) -> str:
+    def _get_password(self, opts: dict, result: CommandResult) -> str:
+        """Resolve the password to store: generate one (and copy it to the
+        clipboard as a convenience, same as before) if opts["generate"] is
+        set, otherwise use the plaintext password the caller already
+        collected in opts["password"] -- this schema never prompts for one
+        itself. `result` collects any user-facing notice about it."""
         length = opts.get("length", MIN_PASSWORD_LENGTH)
         words = opts.get("words", 5)
         if length < MIN_PASSWORD_LENGTH:
@@ -75,172 +87,169 @@ class CredentialsSchema(Schema):
             passphrase = opts.get("passphrase", False)
             password = generate_passphrase(words) if passphrase else generate_password(length)
             label = "Passphrase" if passphrase else "Password"
-            console.print(f"\n[bold cyan]Generated {label}:[/bold cyan] [bold white]{password}[/bold white]")
-            copy_to_clipboard(password, label=label)
-            console.print()
+            result.say(f"Generated {label}: {password}", "bold cyan")
+            _clipboard_lines(result, copy_to_clipboard(password, label=label))
             return password
 
-        return prompt_new_password()
+        password = opts.get("password")
+        if not password:
+            raise SecretRequired("Password")
+        return password
 
     # ---- read ----
 
-    def cmd_list(self, document: Credentials, args, config) -> None:
+    def cmd_list(self, document: Credentials, args, config) -> CommandResult:
+        result = CommandResult()
         if not document.services:
-            console.print("No services stored.", style="bold yellow")
-            return
+            return result.say("No services stored.", "bold yellow")
         for service, accounts in document.services.items():
-            console.print(f"{service}  ({len(accounts)} account{'s' if len(accounts) != 1 else ''})", style="bold magenta")
+            result.say(f"{service}  ({len(accounts)} account{'s' if len(accounts) != 1 else ''})", "bold magenta")
             for acc in accounts:
-                console.print(f"  - {acc.userid}", style="white")
+                result.say(f"  - {acc.userid}", "white")
+        return result
 
-    def cmd_list_all(self, document: Credentials, config) -> None:
+    def cmd_list_all(self, document: Credentials, config) -> CommandResult:
+        result = CommandResult()
         if not document.services:
-            console.print("No services stored.", style="bold yellow")
-            return
+            return result.say("No services stored.", "bold yellow")
         for service, accounts in document.services.items():
-            console.print(service, style="bold magenta")
+            result.say(service, "bold magenta")
             for acc in accounts:
-                console.print(f"  - {acc.userid}", style="white")
+                result.say(f"  - {acc.userid}", "white")
+        return result
 
-    def cmd_get(self, document: Credentials, args, config) -> None:
+    def cmd_get(self, document: Credentials, args, config) -> CommandResult:
         if not args or len(args) > 2:
             raise SchemaError("Usage: credmgr get <service> [userid]")
         service, userid = args[0], (args[1] if len(args) == 2 else None)
         _validate_service_user(service, userid)
 
+        result = CommandResult()
         matched_services = search_services(document, service)
         if not matched_services:
-            console.print(f"\n[yellow]No service matching '[bold]{service}[/bold]' found.[/yellow]\n")
-            return
+            return result.say(f"No service matching '{service}' found.", "yellow")
 
-        results = []
+        rows_by_service = []
         for svc in matched_services:
             accounts = document.services[svc]
             if userid is None:
-                results.append((svc, accounts))
+                rows_by_service.append((svc, accounts))
             else:
                 matched_accounts = search_accounts(accounts, userid)
                 if matched_accounts:
-                    results.append((svc, matched_accounts))
+                    rows_by_service.append((svc, matched_accounts))
 
-        if not results:
-            console.print(f"\n[yellow]No account '[bold]{userid}[/bold]' found under matching services.[/yellow]\n")
-            return
+        if not rows_by_service:
+            return result.say(f"No account '{userid}' found under matching services.", "yellow")
 
-        render_get_results(results)
+        rows = []
+        first = True
+        for svc, accounts in rows_by_service:
+            if not first:
+                rows.append(["", "", "", ""])
+            first = False
+            for i, acc in enumerate(accounts):
+                rows.append([svc if i == 0 else "", acc.userid, acc.password, acc.notes])
 
-    def cmd_search(self, document: Credentials, query: str, config) -> None:
+        result.table = Table(headers=["Service", "User ID", "Password", "Notes"], rows=rows)
+        return result
+
+    def cmd_search(self, document: Credentials, query: str, config) -> CommandResult:
         _validate(query, "query", max_length=MAX_QUERY_LENGTH)
-        results = global_search(document, query)
-        if not results:
-            console.print(f"No matches for '{query}'.", style="bold yellow")
-            return
+        result = CommandResult()
+        matches = global_search(document, query)
+        if not matches:
+            return result.say(f"No matches for '{query}'.", "bold yellow")
 
-        console.print(f"\n[bold cyan]{len(results)} match(es) for '{query}':[/bold cyan]\n")
-        for service, acc, field_hit in results:
-            console.print(
-                f"  [bold green]{service}[/bold green] / [white]{acc.userid}[/white] "
-                f"[dim](matched: {field_hit})[/dim]"
-            )
+        result.say(f"{len(matches)} match(es) for '{query}':", "bold cyan")
+        for service, acc, field_hit in matches:
+            result.say(f"  {service} / {acc.userid}  (matched: {field_hit})")
+        return result
 
-    def cmd_copy(self, document: Credentials, args, config) -> None:
+    def cmd_copy(self, document: Credentials, args, config) -> CommandResult:
         if not args or len(args) > 2:
             raise SchemaError("Usage: credmgr copy <service> [userid]")
         service, userid = args[0], (args[1] if len(args) == 2 else None)
         _validate_service_user(service, userid)
 
+        result = CommandResult()
         matched_services = search_services(document, service)
         if not matched_services:
-            console.print(f"Service '{service}' not found.", style="bold red")
-            return
+            return result.say(f"Service '{service}' not found.", "bold red")
         if len(matched_services) > 1:
-            console.print(
+            return result.say(
                 f"Ambiguous service '{service}'. Be more specific. Matches: {', '.join(matched_services)}",
-                style="bold yellow"
+                "bold yellow"
             )
-            return
         svc = matched_services[0]
         accounts = document.services[svc]
 
         if not accounts:
-            console.print(f"No accounts under '{svc}'.", style="bold yellow")
-            return
+            return result.say(f"No accounts under '{svc}'.", "bold yellow")
 
         if userid is not None:
             matched_accounts = search_accounts(accounts, userid)
             if not matched_accounts:
-                console.print(f"No account '{userid}' under '{svc}'.", style="bold red")
-                return
+                return result.say(f"No account '{userid}' under '{svc}'.", "bold red")
             if len(matched_accounts) > 1:
-                console.print("Multiple matches -- please be more specific:", style="bold yellow")
-                for m in matched_accounts:
-                    console.print(f"  [white]- {m.userid}[/white]")
-                return
+                result.say("Multiple matches -- please be more specific:", "bold yellow")
+                result.choices = [m.userid for m in matched_accounts]
+                return result
             acc = matched_accounts[0]
+        elif len(accounts) == 1:
+            acc = accounts[0]
         else:
-            if len(accounts) == 1:
-                acc = accounts[0]
-            else:
-                console.print(f"\n  [bold cyan]Accounts under '[green]{svc}[/green]':[/bold cyan]")
-                for i, a in enumerate(accounts, start=1):
-                    console.print(f"  [bold white]{i}.[/bold white] [white]{a.userid}[/white]")
-                console.print()
-                try:
-                    raw = input("  Select account (number): ").strip()
-                except KeyboardInterrupt:
-                    print()
-                    return
-                if not raw.isdigit() or not (1 <= int(raw) <= len(accounts)):
-                    console.print("[bold red]Invalid selection.[/bold red]")
-                    return
-                acc = accounts[int(raw) - 1]
+            # Ambiguous: ask the caller to retry with a specific userid
+            # (frontend presents `result.choices` and re-invokes
+            # cmd_copy(document, [service, chosen_userid], config)).
+            result.say(f"Multiple accounts under '{svc}' -- specify a userid.", "bold cyan")
+            result.choices = [a.userid for a in accounts]
+            return result
 
-        console.print()
-        copy_to_clipboard(acc.password, label=f"{svc} / {acc.userid}")
+        _clipboard_lines(result, copy_to_clipboard(acc.password, label=f"{svc} / {acc.userid}"))
+        return result
 
-    def cmd_history(self, document: Credentials, args, config) -> None:
+    def cmd_history(self, document: Credentials, args, config) -> CommandResult:
         if len(args) != 2:
             raise SchemaError("Usage: credmgr history <service> <userid>")
         service, userid = args
         _validate_service_user(service, userid)
-        resolved = resolve_for_mutation(document, service, userid)
-        if resolved is None:
-            return
-        svc, accounts, acc = resolved
+        svc, accounts, acc = resolve_for_mutation(document, service, userid)
 
+        result = CommandResult()
         if acc is None:
-            console.print("\nSpecify a userid to view its password history.", style="bold yellow")
-            return
+            return result.say("Specify a userid to view its password history.", "bold yellow")
         if not acc.history:
-            console.print(f"\nNo password history for '{acc.userid}' under '{svc}'.", style="bold yellow")
-            return
+            return result.say(f"No password history for '{acc.userid}' under '{svc}'.", "bold yellow")
 
-        console.print(f"\n[bold cyan]Password history for {svc} / {acc.userid}:[/bold cyan]")
+        result.say(f"Password history for {svc} / {acc.userid}:", "bold cyan")
         for entry in acc.history:
             when = time.strftime("%Y-%m-%d %H:%M", time.localtime(entry.changed_at))
-            console.print(f"  [dim]{when}[/dim]  {entry.password}")
+            result.say(f"  {when}  {entry.password}", "dim")
+        return result
 
     # ---- write ----
 
-    def cmd_add(self, document: Credentials, args, opts: dict, config) -> bool:
+    def cmd_add(self, document: Credentials, args, opts: dict, config) -> CommandResult:
         if len(args) != 2:
             raise SchemaError("Usage: credmgr add <service> <userid>")
         service, userid = args
         _validate_service_user(service, userid)
         accounts = document.services.setdefault(service, [])
 
+        result = CommandResult()
         if search_accounts(accounts, userid):
-            console.print(f"Account '{userid}' already exists under '{service}'. Use 'update'.", style="bold yellow")
-            return False
+            return result.say(f"Account '{userid}' already exists under '{service}'. Use 'update'.", "bold yellow")
 
-        password = self._get_password(opts)
+        password = self._get_password(opts, result)
         notes = opts.get("notes", "")
         now = time.time()
         accounts.append(Account(userid=userid, password=password, notes=notes, created_at=now, updated_at=now))
-        console.print(f"Added '{userid}' under '{service}'", style="bold green")
-        return True
+        result.say(f"Added '{userid}' under '{service}'", "bold green")
+        result.mutated = True
+        return result
 
-    def cmd_update(self, document: Credentials, args, opts: dict, config) -> bool:
+    def cmd_update(self, document: Credentials, args, opts: dict, config) -> CommandResult:
         if len(args) < 3:
             raise SchemaError(
                 "Usage: credmgr update <service> <userid> <field> [new_value]  "
@@ -253,186 +262,180 @@ class CredentialsSchema(Schema):
             raise SchemaError(f"Unknown field '{field}'. Must be one of: {', '.join(UPDATE_FIELDS)}")
 
         _validate_service_user(service, userid)
+        result = CommandResult()
 
         if field == "userid":
             if not new_value:
                 raise SchemaError("'update ... userid' requires a <new_value> argument.")
             _validate(new_value, "new userid", max_length=MAX_LABEL_LENGTH)
-            resolved = resolve_for_mutation(document, service, userid)
-            if resolved is None:
-                return False
-            svc, accounts, acc = resolved
+            svc, accounts, acc = resolve_for_mutation(document, service, userid)
             if search_accounts(accounts, new_value) and new_value.lower() != acc.userid.lower():
-                console.print(f"Account '{new_value}' already exists under '{svc}'.", style="bold yellow")
-                return False
+                return result.say(f"Account '{new_value}' already exists under '{svc}'.", "bold yellow")
             acc.userid = new_value
-            console.print(f"Renamed '{userid}' -> '{new_value}' under '{svc}'", style="bold green")
-            return True
+            result.say(f"Renamed '{userid}' -> '{new_value}' under '{svc}'", "bold green")
+            result.mutated = True
+            return result
 
         if field == "password":
-            resolved = resolve_for_mutation(document, service, userid)
-            if resolved is None:
-                return False
-            svc, accounts, acc = resolved
-            password = self._get_password(opts)
+            svc, accounts, acc = resolve_for_mutation(document, service, userid)
+            password = self._get_password(opts, result)
             _push_history(acc, config.password_history_limit)
             acc.password = password
             acc.updated_at = time.time()
-            console.print(f"Password updated for '{acc.userid}' under '{svc}'", style="bold green")
-            return True
+            result.say(f"Password updated for '{acc.userid}' under '{svc}'", "bold green")
+            result.mutated = True
+            return result
 
         if field == "notes":
             if new_value is None:
                 raise SchemaError("'update ... notes' requires a <new_value> argument.")
-            resolved = resolve_for_mutation(document, service, userid)
-            if resolved is None:
-                return False
-            svc, accounts, acc = resolved
+            svc, accounts, acc = resolve_for_mutation(document, service, userid)
             acc.notes = new_value
-            console.print(f"Notes updated for '{acc.userid}' under '{svc}'", style="bold green")
-            return True
+            result.say(f"Notes updated for '{acc.userid}' under '{svc}'", "bold green")
+            result.mutated = True
+            return result
 
         # field == "account"
         if not new_value:
             raise SchemaError("'update ... account' requires a <new_value> argument.")
         _validate(new_value, "new userid", max_length=MAX_LABEL_LENGTH)
-        resolved = resolve_for_mutation(document, service, userid)
-        if resolved is None:
-            return False
-        svc, accounts, acc = resolved
+        svc, accounts, acc = resolve_for_mutation(document, service, userid)
         if search_accounts(accounts, new_value) and new_value.lower() != acc.userid.lower():
-            console.print(f"Account '{new_value}' already exists under '{svc}'.", style="bold yellow")
-            return False
-        password = self._get_password(opts)
+            return result.say(f"Account '{new_value}' already exists under '{svc}'.", "bold yellow")
+        password = self._get_password(opts, result)
         _push_history(acc, config.password_history_limit)
         acc.userid = new_value
         acc.password = password
         acc.updated_at = time.time()
-        console.print(f"Account updated: '{userid}' -> '{new_value}' under '{svc}'", style="bold green")
-        return True
+        result.say(f"Account updated: '{userid}' -> '{new_value}' under '{svc}'", "bold green")
+        result.mutated = True
+        return result
 
-    def cmd_delete(self, document: Credentials, args, config) -> bool:
+    def cmd_delete(self, document: Credentials, args, config, confirmed: bool = False) -> CommandResult:
         if not args or len(args) > 2:
             raise SchemaError("Usage: credmgr delete <service> [userid]")
         service, userid = args[0], (args[1] if len(args) == 2 else None)
         _validate_service_user(service, userid)
-        resolved = resolve_for_mutation(document, service, userid)
-        if resolved is None:
-            return False
-        svc, accounts, acc = resolved
+        svc, accounts, acc = resolve_for_mutation(document, service, userid)
+
+        result = CommandResult()
 
         if acc is None:
             n = len(accounts)
-            confirm = input(f"Delete all {n} account(s) under '{svc}'? [y/N] ").strip().lower()
-            if confirm != "y":
-                print("Aborted.")
-                return False
+            if not confirmed:
+                result.say(f"Delete all {n} account(s) under '{svc}'?", "bold yellow")
+                result.needs_confirmation = True
+                return result
             del document.services[svc]
-            console.print(f"Deleted service '{svc}'.", style="bold red")
+            result.say(f"Deleted service '{svc}'.", "bold red")
         else:
             accounts.remove(acc)
             if not accounts:
                 del document.services[svc]
-                console.print(f"Deleted '{acc.userid}' -- '{svc}' removed (no accounts left).", style="bold red")
+                result.say(f"Deleted '{acc.userid}' -- '{svc}' removed (no accounts left).", "bold red")
             else:
-                console.print(f"Deleted '{acc.userid}' from '{svc}'.", style="bold red")
+                result.say(f"Deleted '{acc.userid}' from '{svc}'.", "bold red")
 
-        return True
+        result.mutated = True
+        return result
 
-    def cmd_audit(self, document: Credentials, config) -> None:
+    def cmd_audit(self, document: Credentials, config) -> CommandResult:
         report = audit_mod.run_audit(document, config)
-
-        console.print("\n[bold cyan]Password Audit[/bold cyan]\n")
+        result = CommandResult()
+        result.say("Password Audit", "bold cyan")
+        result.say("")
 
         if report.duplicates:
-            console.print("[bold yellow]Duplicate passwords:[/bold yellow]")
+            result.say("Duplicate passwords:", "bold yellow")
             for locations in report.duplicates.values():
                 where = ", ".join(f"{s}/{u}" for s, u in locations)
-                console.print(f"  - {where}")
+                result.say(f"  - {where}")
         else:
-            console.print("[green]No duplicate passwords.[/green]")
-        console.print()
+            result.say("No duplicate passwords.", "green")
+        result.say("")
 
         if report.weak:
-            console.print("[bold yellow]Weak passwords:[/bold yellow]")
+            result.say("Weak passwords:", "bold yellow")
             for service, userid, reasons in report.weak:
-                console.print(f"  - {service}/{userid}: {', '.join(reasons)}")
+                result.say(f"  - {service}/{userid}: {', '.join(reasons)}")
         else:
-            console.print("[green]No weak passwords detected.[/green]")
-        console.print()
+            result.say("No weak passwords detected.", "green")
+        result.say("")
 
         if report.reused:
-            console.print("[bold yellow]Reused passwords (matches an earlier password):[/bold yellow]")
+            result.say("Reused passwords (matches an earlier password):", "bold yellow")
             for service, userid in report.reused:
-                console.print(f"  - {service}/{userid}")
+                result.say(f"  - {service}/{userid}")
         else:
-            console.print("[green]No password reuse detected.[/green]")
-        console.print()
+            result.say("No password reuse detected.", "green")
+        result.say("")
 
         if report.old:
-            console.print(f"[bold yellow]Passwords older than {config.password_max_age_days} days:[/bold yellow]")
+            result.say(f"Passwords older than {config.password_max_age_days} days:", "bold yellow")
             for service, userid, age in report.old:
-                console.print(f"  - {service}/{userid}: {int(age)} days old")
+                result.say(f"  - {service}/{userid}: {int(age)} days old")
         else:
-            console.print("[green]No stale passwords.[/green]")
-        console.print()
+            result.say("No stale passwords.", "green")
+        result.say("")
 
         if report.breach_db_available:
             if report.breached:
-                console.print("[bold red]Breached passwords (found in local breach database):[/bold red]")
+                result.say("Breached passwords (found in local breach database):", "bold red")
                 for service, userid in report.breached:
-                    console.print(f"  - {service}/{userid}")
+                    result.say(f"  - {service}/{userid}")
             else:
-                console.print("[green]No breached passwords found.[/green]")
+                result.say("No breached passwords found.", "green")
         else:
-            console.print(
-                f"[dim]Breach check skipped: no database at {config.breach_db_file}. "
+            result.say(
+                f"Breach check skipped: no database at {config.breach_db_file}. "
                 "Run 'credmgr fetch-data' to download one, or populate it yourself with "
-                "one SHA-1 password hash per line (see README).[/dim]"
+                "one SHA-1 password hash per line (see README).",
+                "dim"
             )
 
-    def cmd_import(self, document: Credentials, filepath: str, config) -> bool:
+        return result
+
+    def cmd_import(self, document: Credentials, filepath: str, config) -> CommandResult:
+        result = CommandResult()
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 imported = json.load(f)
         except (json.JSONDecodeError, OSError) as e:
-            console.print(f"Failed to read import file: {e}", style="bold red")
-            return False
+            return result.say(f"Failed to read import file: {e}", "bold red")
 
         if not isinstance(imported, dict):
-            console.print("Import file must contain a JSON object of services.", style="bold red")
-            return False
+            return result.say("Import file must contain a JSON object of services.", "bold red")
 
         now = time.time()
         for service, accounts in imported.items():
             try:
                 validate_text(service, "service", max_length=MAX_LABEL_LENGTH)
             except ValueError as e:
-                console.print(f"Skipping invalid service name in import: {service!r} ({e})", style="bold yellow")
+                result.say(f"Skipping invalid service name in import: {service!r} ({e})", "bold yellow")
                 continue
             if not isinstance(accounts, list):
-                console.print(f"Skipping invalid accounts list under '{service}'.", style="bold yellow")
+                result.say(f"Skipping invalid accounts list under '{service}'.", "bold yellow")
                 continue
             existing = document.services.setdefault(service, [])
             existing_userids = {acc.userid for acc in existing}
 
             for acc_data in accounts:
                 if not isinstance(acc_data, dict) or "userid" not in acc_data or "password" not in acc_data:
-                    console.print(f"Skipping invalid account under '{service}'.", style="bold yellow")
+                    result.say(f"Skipping invalid account under '{service}'.", "bold yellow")
                     continue
                 try:
                     validate_text(acc_data["userid"], "userid", max_length=MAX_LABEL_LENGTH)
                 except ValueError as e:
-                    console.print(f"Skipping invalid account under '{service}' ({e}).", style="bold yellow")
+                    result.say(f"Skipping invalid account under '{service}' ({e}).", "bold yellow")
                     continue
                 if not isinstance(acc_data["password"], str):
-                    console.print(f"Skipping invalid account under '{service}' (password must be text).", style="bold yellow")
+                    result.say(f"Skipping invalid account under '{service}' (password must be text).", "bold yellow")
                     continue
                 if not isinstance(acc_data.get("notes", ""), str):
-                    console.print(f"Skipping invalid account under '{service}' (notes must be text).", style="bold yellow")
+                    result.say(f"Skipping invalid account under '{service}' (notes must be text).", "bold yellow")
                     continue
                 if acc_data["userid"] in existing_userids:
-                    console.print(f"Skipping duplicate: {service}/{acc_data['userid']}", style="bold yellow")
+                    result.say(f"Skipping duplicate: {service}/{acc_data['userid']}", "bold yellow")
                     continue
 
                 existing.append(Account(
@@ -443,11 +446,12 @@ class CredentialsSchema(Schema):
                     updated_at=now
                 ))
 
-        console.print("Import completed.", style="bold green")
-        return True
+        result.say("Import completed.", "bold green")
+        result.mutated = True
+        return result
 
-    def cmd_export(self, document: Credentials, config) -> None:
-        print(json.dumps(document.to_dict(), indent=4))
+    def cmd_export(self, document: Credentials, config) -> CommandResult:
+        return CommandResult(raw=json.dumps(document.to_dict(), indent=4))
 
     # ---- global (cross-vault) search index ----
 

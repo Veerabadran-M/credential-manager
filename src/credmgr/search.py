@@ -53,20 +53,24 @@ def search_accounts(accounts: list, query: str) -> list:
     return [acc for acc in accounts if pattern.search(acc.userid)]
 
 def resolve_for_mutation(creds: Credentials, service: str, userid):
-    """Resolve a service (+ optional userid) for commands that mutate the vault."""
-    from .ui import console  # local import avoids a circular import at module load time
+    """Resolve a service (+ optional userid) for commands that mutate the
+    vault. Returns (service_name, accounts, account_or_None) -- account is
+    None when `userid` wasn't given (caller wants the whole service).
+
+    Raises SchemaError (imported lazily to avoid a circular import at
+    module load time -- credmgr.schemas imports credmgr.search's callers,
+    not the other way around) when the service/userid can't be resolved
+    unambiguously; callers just let it propagate."""
+    from .schemas.base import SchemaError  # local import: avoids a circular import at load time
 
     matched_services = search_services(creds, service)
     if not matched_services:
-        console.print(f"Service '{service}' not found.", style="bold red")
-        return None
+        raise SchemaError(f"Service '{service}' not found.")
     if len(matched_services) > 1:
-        console.print(
+        raise SchemaError(
             f"Ambiguous service '{service}'. Be more specific. "
-            f"Matches: {', '.join(matched_services)}",
-            style="bold yellow"
+            f"Matches: {', '.join(matched_services)}"
         )
-        return None
     svc = matched_services[0]
     accounts = creds.services[svc]
 
@@ -75,15 +79,12 @@ def resolve_for_mutation(creds: Credentials, service: str, userid):
 
     matched_accounts = search_accounts(accounts, userid)
     if not matched_accounts:
-        console.print(f"No account '{userid}' under '{svc}'.", style="bold red")
-        return None
+        raise SchemaError(f"No account '{userid}' under '{svc}'.")
     if len(matched_accounts) > 1:
-        console.print(
+        raise SchemaError(
             f"Ambiguous userid '{userid}'. Be more specific. "
-            f"Matches: {', '.join(a.userid for a in matched_accounts)}",
-            style="bold yellow"
+            f"Matches: {', '.join(a.userid for a in matched_accounts)}"
         )
-        return None
 
     return svc, accounts, matched_accounts[0]
 

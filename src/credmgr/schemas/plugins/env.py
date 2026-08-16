@@ -11,9 +11,8 @@ from __future__ import annotations
 import difflib
 
 from ...clipboard import copy_to_clipboard
-from ...ui import console
 from ...validation import validate_text
-from ..base import IndexEntry, Schema, SchemaError
+from ..base import CommandResult, IndexEntry, Schema, SchemaError
 
 MAX_KEY_LENGTH = 256
 MAX_VALUE_LENGTH = 8192
@@ -119,29 +118,31 @@ class EnvSchema(Schema):
 
     # ---- read ----
 
-    def cmd_list(self, document: EnvDocument, args, config) -> None:
+    def cmd_list(self, document: EnvDocument, args, config) -> CommandResult:
+        result = CommandResult()
         if not document.entries:
-            console.print("No entries stored.", style="bold yellow")
-            return
-        console.print(f"{len(document.entries)} entr{'y' if len(document.entries) == 1 else 'ies'}:", style="bold magenta")
+            return result.say("No entries stored.", "bold yellow")
+        result.say(f"{len(document.entries)} entr{'y' if len(document.entries) == 1 else 'ies'}:", "bold magenta")
         for key, _value in document.entries:
-            console.print(f"  - {key}", style="white")
+            result.say(f"  - {key}", "white")
+        return result
 
-    def cmd_list_all(self, document: EnvDocument, config) -> None:
+    def cmd_list_all(self, document: EnvDocument, config) -> CommandResult:
+        result = CommandResult()
         if not document.entries:
-            console.print("No entries stored.", style="bold yellow")
-            return
+            return result.say("No entries stored.", "bold yellow")
         for key, _value in document.entries:
-            console.print(key, style="white")
+            result.say(key, "white")
+        return result
 
-    def cmd_get(self, document: EnvDocument, args, config) -> None:
+    def cmd_get(self, document: EnvDocument, args, config) -> CommandResult:
+        result = CommandResult()
         if not args:
             if not document.entries:
-                console.print("No entries stored.", style="bold yellow")
-                return
+                return result.say("No entries stored.", "bold yellow")
             for key, value in document.entries:
-                console.print(f"  [bold green]{key}[/bold green] = [white]{value}[/white]")
-            return
+                result.say(f"  {key} = {value}")
+            return result
 
         if len(args) != 1:
             raise SchemaError("Usage: credmgr get [key]")
@@ -149,113 +150,121 @@ class EnvSchema(Schema):
         key = args[0]
         matches = _match_keys(document, key)
         if not matches:
-            console.print(f"No key matching '{key}' found.", style="bold yellow")
-            return
+            return result.say(f"No key matching '{key}' found.", "bold yellow")
 
         for k in matches:
-            console.print(f"  [bold green]{k}[/bold green] = [white]{document.get(k)}[/white]")
+            result.say(f"  {k} = {document.get(k)}")
+        return result
 
-    def cmd_search(self, document: EnvDocument, query: str, config) -> None:
+    def cmd_search(self, document: EnvDocument, query: str, config) -> CommandResult:
+        result = CommandResult()
         matches = _match_keys(document, query)
         if not matches:
-            console.print(f"No matches for '{query}'.", style="bold yellow")
-            return
-        console.print(f"\n[bold cyan]{len(matches)} match(es) for '{query}':[/bold cyan]\n")
+            return result.say(f"No matches for '{query}'.", "bold yellow")
+        result.say(f"{len(matches)} match(es) for '{query}':", "bold cyan")
         for k in matches:
-            console.print(f"  [bold green]{k}[/bold green] = [white]{document.get(k)}[/white]")
+            result.say(f"  {k} = {document.get(k)}")
+        return result
 
-    def cmd_copy(self, document: EnvDocument, args, config) -> None:
+    def cmd_copy(self, document: EnvDocument, args, config) -> CommandResult:
         if len(args) != 1:
             raise SchemaError("Usage: credmgr copy <key>")
+        result = CommandResult()
         matches = _match_keys(document, args[0])
         if not matches:
-            console.print(f"Key '{args[0]}' not found.", style="bold red")
-            return
+            return result.say(f"Key '{args[0]}' not found.", "bold red")
         if len(matches) > 1:
-            console.print(f"Ambiguous key '{args[0]}'. Be more specific. Matches: {', '.join(matches)}", style="bold yellow")
-            return
+            return result.say(f"Ambiguous key '{args[0]}'. Be more specific. Matches: {', '.join(matches)}", "bold yellow")
         key = matches[0]
-        copy_to_clipboard(document.get(key), label=key)
+
+        clip = copy_to_clipboard(document.get(key), label=key)
+        if clip.copied:
+            result.say(f"{clip.label} copied to clipboard. Clears in {clip.timeout}s.", "bold green")
+        else:
+            result.say(f"{clip.label} was not copied ({clip.reason}).", "bold yellow")
+        return result
 
     # ---- write ----
 
-    def cmd_add(self, document: EnvDocument, args, opts: dict, config) -> bool:
+    def cmd_add(self, document: EnvDocument, args, opts: dict, config) -> CommandResult:
         if len(args) != 2:
             raise SchemaError("Usage: credmgr add <KEY> <VALUE>")
         key, value = args
         key = _validate_key(key)
         value = _validate_value(value)
 
+        result = CommandResult()
         if document.index_of(key) >= 0:
-            console.print(f"Key '{key}' already exists. Use 'update'.", style="bold yellow")
-            return False
+            return result.say(f"Key '{key}' already exists. Use 'update'.", "bold yellow")
 
         document.set(key, value)
-        console.print(f"Added '{key}'", style="bold green")
-        return True
+        result.say(f"Added '{key}'", "bold green")
+        result.mutated = True
+        return result
 
-    def cmd_update(self, document: EnvDocument, args, opts: dict, config) -> bool:
+    def cmd_update(self, document: EnvDocument, args, opts: dict, config) -> CommandResult:
         if len(args) != 2:
             raise SchemaError("Usage: credmgr update <KEY> <VALUE>")
         key, value = args
         key = _validate_key(key)
         value = _validate_value(value)
 
+        result = CommandResult()
         if document.index_of(key) < 0:
-            console.print(f"Key '{key}' not found. Use 'add'.", style="bold yellow")
-            return False
+            return result.say(f"Key '{key}' not found. Use 'add'.", "bold yellow")
 
         document.set(key, value)
-        console.print(f"Updated '{key}'", style="bold green")
-        return True
+        result.say(f"Updated '{key}'", "bold green")
+        result.mutated = True
+        return result
 
-    def cmd_delete(self, document: EnvDocument, args, config) -> bool:
+    def cmd_delete(self, document: EnvDocument, args, config, confirmed: bool = False) -> CommandResult:
         if len(args) != 1:
             raise SchemaError("Usage: credmgr delete <KEY>")
         key = args[0]
+        result = CommandResult()
         matches = _match_keys(document, key)
         if not matches:
-            console.print(f"Key '{key}' not found.", style="bold red")
-            return False
+            return result.say(f"Key '{key}' not found.", "bold red")
         if len(matches) > 1:
-            console.print(f"Ambiguous key '{key}'. Be more specific. Matches: {', '.join(matches)}", style="bold yellow")
-            return False
+            return result.say(f"Ambiguous key '{key}'. Be more specific. Matches: {', '.join(matches)}", "bold yellow")
 
         document.delete(matches[0])
-        console.print(f"Deleted '{matches[0]}'.", style="bold red")
-        return True
+        result.say(f"Deleted '{matches[0]}'.", "bold red")
+        result.mutated = True
+        return result
 
-    def cmd_import(self, document: EnvDocument, filepath: str, config) -> bool:
+    def cmd_import(self, document: EnvDocument, filepath: str, config) -> CommandResult:
+        result = CommandResult()
         try:
             with open(filepath, "rb") as f:
                 raw = f.read()
         except OSError as e:
-            console.print(f"Failed to read import file: {e}", style="bold red")
-            return False
+            return result.say(f"Failed to read import file: {e}", "bold red")
 
         imported = EnvSchema.parse(raw)
         if not imported.entries:
-            console.print("No valid KEY=VALUE entries found in import file.", style="bold yellow")
-            return False
+            return result.say("No valid KEY=VALUE entries found in import file.", "bold yellow")
 
         added = 0
         for key, value in imported.entries:
             if document.index_of(key) >= 0:
-                console.print(f"Skipping duplicate: {key}", style="bold yellow")
+                result.say(f"Skipping duplicate: {key}", "bold yellow")
                 continue
             document.entries.append((key, value))
             added += 1
 
-        console.print(f"Import completed ({added} added).", style="bold green")
-        return added > 0
+        result.say(f"Import completed ({added} added).", "bold green")
+        result.mutated = added > 0
+        return result
 
-    def cmd_export(self, document: EnvDocument, config) -> None:
-        print(EnvSchema.serialize(document).decode("utf-8"), end="")
+    def cmd_export(self, document: EnvDocument, config) -> CommandResult:
+        return CommandResult(raw=EnvSchema.serialize(document).decode("utf-8"))
 
     # ---- global (cross-vault) search index ----
 
     def index_entries(self, document: EnvDocument) -> list[IndexEntry]:
         return [
-            IndexEntry(fields={"lhs": key}, summary=[("Key", key)], args=[key])
+            IndexEntry(fields={"key": key}, summary=[("Key", key)], args=[key])
             for key, _value in document.entries
         ]

@@ -4,7 +4,10 @@ search across service names, userids, and notes.
 
 from __future__ import annotations
 
+import pytest
+
 from credmgr.models import Account, Credentials
+from credmgr.schemas.base import SchemaError
 from credmgr.search import (global_search, resolve_for_mutation,
                              search_accounts, search_services)
 
@@ -76,14 +79,16 @@ def test_search_accounts_no_match():
 
 # ---- resolve_for_mutation ----
 
-def test_resolve_for_mutation_unknown_service_returns_none():
+def test_resolve_for_mutation_unknown_service_raises():
     creds = _creds()
-    assert resolve_for_mutation(creds, "doesnotexist", None) is None
+    with pytest.raises(SchemaError, match="not found"):
+        resolve_for_mutation(creds, "doesnotexist", None)
 
 
-def test_resolve_for_mutation_ambiguous_service_returns_none():
+def test_resolve_for_mutation_ambiguous_service_raises():
     creds = _creds()
-    assert resolve_for_mutation(creds, "git", None) is None
+    with pytest.raises(SchemaError, match="Ambiguous"):
+        resolve_for_mutation(creds, "git", None)
 
 
 def test_resolve_for_mutation_without_userid_returns_all_accounts():
@@ -103,9 +108,10 @@ def test_resolve_for_mutation_with_userid_returns_matching_account():
     assert acc.userid == "alice"
 
 
-def test_resolve_for_mutation_unknown_userid_returns_none():
+def test_resolve_for_mutation_unknown_userid_raises():
     creds = _creds()
-    assert resolve_for_mutation(creds, "github", "nobody") is None
+    with pytest.raises(SchemaError, match="No account"):
+        resolve_for_mutation(creds, "github", "nobody")
 
 
 # ---- global_search ----
