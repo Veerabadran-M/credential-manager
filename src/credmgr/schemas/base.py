@@ -46,6 +46,24 @@ class SecretRequired(SchemaError):
         self.label = label
         super().__init__(f"A {label.lower()} is required.")
 
+class ContentRequired(SchemaError):
+    """Raised by cmd_add/cmd_update when no content was given on the
+    command line (no args, and opts["content"] wasn't already supplied)
+    and the schema wants a full block of text rather than a single
+    prompted value. This schema never opens an editor or reads a
+    terminal itself -- callers catch this, obtain the text however fits
+    them (e.g. by opening `config.editor` on a temp file, seeded with
+    `initial`), and retry the same call with opts["content"] set.
+
+    `initial` is the text a caller should pre-populate its editor with:
+    empty for a fresh `add`, the existing document content for an
+    `update` the user is meant to be editing in place.
+    """
+
+    def __init__(self, initial: str = ""):
+        self.initial = initial
+        super().__init__("Content is required.")
+
 @dataclass
 class IndexEntry:
     """One searchable row contributed by a schema to the cross-vault

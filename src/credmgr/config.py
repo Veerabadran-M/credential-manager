@@ -10,7 +10,7 @@ import json
 import os
 import sys
 import tempfile
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from .crypto.registry import all_backends
@@ -69,6 +69,12 @@ class Configuration:
     # Password audit
     password_max_age_days: int = 90
     password_history_limit: int = 10
+
+    # External text editor used by `add`/`update` (text schema only) when
+    # invoked with no content argument. Falls back through $VISUAL/$EDITOR,
+    # then a sane platform default, so it works out of the box; override
+    # with `credmgr config set editor <command>`.
+    editor: str = field(default_factory=lambda: os.environ.get("VISUAL") or os.environ.get("EDITOR") or ("notepad" if os.name == "nt" else "nano"))
 
     # ---- derived paths ----
 
@@ -154,7 +160,7 @@ class Configuration:
     def mutable_parameters(self) -> list:
         return ["auth_timeout", "fuzzy_threshold", "password_length", 
                 "passphrase_num_word", "clipboard_timeout", "password_max_age_days", 
-                "password_history_limit"]
+                "password_history_limit", "editor"]
     
     @property
     def immutable_parameters(self) -> list:

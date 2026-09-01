@@ -31,7 +31,8 @@ credmgr audit
   decrypted vault contents to disk.
 - **Pluggable content.** Vaults aren't limited to one shape. The bundled
   `credentials` schema stores service/account logins with history;
-  the `env` schema stores flat `KEY=VALUE` secrets. Multiple named
+  the `env` schema stores flat `KEY=VALUE` secrets; the `text` schema
+  turns a vault into a single encrypted text blob. Multiple named
   vaults, each with its own schema and backend, can coexist.
 - **No black boxes.** Wrong password and tampered file are handled by
   the same authentication check every bundled encryption backend
@@ -44,7 +45,7 @@ credmgr audit
 |---|---|
 | **Storage** | One or more versioned, envelope-encrypted vault files, each self-contained under `~/.credmgr/vaults/<name>/` |
 | **Encryption** | Pluggable backends — AES-256-GCM (`cryptography` or `pycryptodome`) and XChaCha20-Poly1305 (`PyNaCl`); keys derived via Argon2id |
-| **Content schemas** | Pluggable vault content — `credentials` (services/accounts/passwords/history) or `env` (flat `KEY=VALUE` entries) |
+| **Content schemas** | Pluggable vault content — `credentials` (services/accounts/passwords/history), `env` (flat `KEY=VALUE` entries), or `text` (one encrypted text blob) |
 | **Multi-vault** | Create, list, switch between, and delete independently encrypted vaults |
 | **Cross-vault search** | `credmgr global <query>` searches a metadata-only index across every vault at once, without switching or decrypting the active one, then unlocks only the vault you pick |
 | **Search** | Exact, substring, and fuzzy matching |
@@ -142,6 +143,7 @@ alongside a flat secrets store:
 ```bash
 credmgr vault create work --schema credentials
 credmgr vault create employee --schema env
+credmgr vault create notes --schema text
 credmgr vault use employee
 credmgr add EMPLOYEE_ID 123456
 credmgr vault list
@@ -170,8 +172,9 @@ layered over a small vault file:
   discovered and looked up through a registry, so the application core
   never imports a crypto library directly.
 - **`credmgr/schemas/`** — an abstract `Schema` interface that owns the
-  *shape* of a vault's contents (`credentials`, `env`, or a custom
-  schema you add), so `vault.py` and `core/manager.py` stay generic.
+  *shape* of a vault's contents (`credentials`, `env`, `text`, or a
+  custom schema you add), so `vault.py` and `core/manager.py` stay
+  generic.
 - **`credmgr/vault.py`** — envelope-encrypted file I/O (Vault Format v1)
   that depends on both interfaces by name, never by import.
 

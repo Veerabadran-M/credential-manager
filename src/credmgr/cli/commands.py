@@ -17,8 +17,8 @@ from typing import List, Optional
 import typer
 
 from ..core import (AuthenticationError, BackendUnavailableError,
-                     CredentialManager, PasswordRequired, SchemaError,
-                     SecretRequired, UnknownBackendError,
+                     ContentRequired, CredentialManager, PasswordRequired,
+                     SchemaError, SecretRequired, UnknownBackendError,
                      UnknownSchemaError, VaultError, VaultNotFound)
 from ..config import (ARGON2_MAX_MEMORY_COST, ARGON2_MIN_MEMORY_COST, ARGON2_MIN_PARALLELISM,
                      ARGON2_MIN_TIME_COST, config)
@@ -26,7 +26,7 @@ from ..crypto.registry import available_backends, get_backend, resolve_backend
 from ..schemas import all_schemas, get_schema
 from ..vaultmgr import VaultManagerError, validate_vault_name
 from . import ui
-from .ui import ask_choice, ask_int, console, fatal, prompt_new_password, safe_getpass
+from .ui import ask_choice, ask_int, console, fatal, open_editor, prompt_new_password, safe_getpass
 
 manager = CredentialManager(config)
 
@@ -52,6 +52,9 @@ def _call(fn, *args, opts: dict | None = None, **kwargs):
                 kwargs["password"] = safe_getpass(e.prompt)
             except SecretRequired:
                 opts = {**opts, "password": prompt_new_password()}
+                call_args = (*args, opts)
+            except ContentRequired as e:
+                opts = {**opts, "content": open_editor(config.editor, e.initial)}
                 call_args = (*args, opts)
     except (SchemaError, VaultError, AuthenticationError, BackendUnavailableError,
             UnknownBackendError, VaultManagerError, VaultNotFound) as e:
@@ -622,9 +625,9 @@ def history_cmd(args: List[str] = typer.Argument(...)) -> None:
 
 ''' -------- write commands (vault + auth required, may persist) -------- '''
 
-@app.command(name="add", help="Add a new entry; args are schema-specific, e.g. <service> <userid> or <KEY> <VALUE>")
+@app.command(name="add", help="Add a new entry; args are schema-specific, e.g. <service> <userid>, <KEY> <VALUE>, or (text schema) a filepath/string/nothing")
 def add_cmd(
-    args: List[str] = typer.Argument(...),
+    args: List[str] = typer.Argument(None),
     generate: bool = typer.Option(False, "--generate"),
     passphrase: bool = typer.Option(False, "--passphrase"),
     length: int = typer.Option(config.password_length, "--length", metavar="N"),
@@ -634,11 +637,11 @@ def add_cmd(
     if not manager.vault_exists():
         fatal(_load_vault_not_found_message(config.active_vault))
     opts = {"generate": generate, "passphrase": passphrase, "length": length, "words": words, "notes": notes}
-    _render(_call(manager.add, args, opts=opts, password=None))
+    _render(_call(manager.add, args or [], opts=opts, password=None))
 
-@app.command(name="update", help="Update an existing entry; args are schema-specific, e.g. <service> <userid> <field> [new_value] or <KEY> <VALUE>")
+@app.command(name="update", help="Update an existing entry; args are schema-specific, e.g. <service> <userid> <field> [new_value], <KEY> <VALUE>, or (text schema) a filepath/string/nothing")
 def update_cmd(
-    args: List[str] = typer.Argument(...),
+    args: List[str] = typer.Argument(None),
     generate: bool = typer.Option(False, "--generate"),
     passphrase: bool = typer.Option(False, "--passphrase"),
     length: int = typer.Option(config.password_length, "--length", metavar="N"),
@@ -647,7 +650,7 @@ def update_cmd(
     if not manager.vault_exists():
         fatal(_load_vault_not_found_message(config.active_vault))
     opts = {"generate": generate, "passphrase": passphrase, "length": length, "words": words}
-    _render(_call(manager.update, args, opts=opts, password=None))
+    _render(_call(manager.update, args or [], opts=opts, password=None))
 
 @app.command(name="delete", help="Delete an entry; args are schema-specific, e.g. <service> [userid] or <KEY>")
 def delete_cmd(args: List[str] = typer.Argument(...)) -> None:

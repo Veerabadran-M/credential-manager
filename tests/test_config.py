@@ -179,3 +179,29 @@ def test_mutable_and_immutable_parameter_lists_are_disjoint(config):
     mutable = set(config.mutable_parameters)
     immutable = set(config.immutable_parameters)
     assert mutable.isdisjoint(immutable)
+
+
+# ---- editor ----
+
+def test_editor_defaults_from_visual_env_var(monkeypatch):
+    monkeypatch.setenv("VISUAL", "code -w")
+    monkeypatch.setenv("EDITOR", "nano")
+    assert Configuration().editor == "code -w"
+
+
+def test_editor_falls_back_to_editor_env_var(monkeypatch):
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.setenv("EDITOR", "vim")
+    assert Configuration().editor == "vim"
+
+
+def test_editor_has_a_default_when_no_env_vars_set(monkeypatch):
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.delenv("EDITOR", raising=False)
+    assert Configuration().editor
+
+
+def test_editor_is_mutable_and_settable(config):
+    assert "editor" in config.mutable_parameters
+    config.set_value("editor", "vim")
+    assert config.editor == "vim"

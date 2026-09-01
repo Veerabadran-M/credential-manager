@@ -43,10 +43,13 @@ flowchart TB
         SR[registry.py<br/>pkgutil discovery]
         SP1[plugins/credentials.py]
         SP2[plugins/env.py]
+        SP3[plugins/text.py]
         SR --> SP1
         SR --> SP2
+        SR --> SP3
         SP1 -. implements .-> SB
         SP2 -. implements .-> SB
+        SP3 -. implements .-> SB
     end
 
     Core --> CR
@@ -271,15 +274,27 @@ vaults are silently skipped by `global`, not crashed on.
 |---|---|---|
 | `credentials` (default) | `Credentials` — a `service → [Account, ...]` tree, each `Account` carrying userid/password/notes/history | All commands, including `audit` and `history`; indexed for `global` by `(service, userid)` |
 | `env` | `EnvDocument` — an ordered list of `(key, value)` pairs | `list`, `list-all`, `get`, `search`, `copy`, `add`, `update`, `delete`, `import`, `export` (no `audit`/`history`); indexed for `global` by `key` |
+| `text` | `TextDocument` — one undivided string, the vault's entire decrypted content | `list`, `get`, `search`, `copy`, `add`, `update`, `delete`, `import`, `export` (no `list-all`/`audit`/`history`, and not indexed for `global` — there are no identifiers to index) |
 
 `list-all` prints a bare, unfiltered per-vault listing shaped by the
 schema: every service with every userid under it (`credentials`), or
 every key (`env`) — no counts, no truncation, just the identifiers.
+The `text` schema doesn't implement `list-all` (or `global` indexing)
+at all, since it has no keyed entries to list.
 
 The `env` schema's on-disk plaintext (before encryption) is a flat
 `KEY=VALUE`-per-line text file — blank lines and `#`-prefixed lines are
 ignored on parse, order is preserved, and values are stored exactly as
 given.
+
+The `text` schema's on-disk plaintext (before encryption) is exactly
+whatever the vault's content is — no framing, no per-entry structure.
+`add` appends a new line, `update` replaces the whole document, `get`/
+`copy`/`delete` optionally take a 1-indexed line number or `start-end`
+range to address a specific line, and `import` appends a file's
+contents onto whatever is already stored. It's the schema to reach for
+when a vault should just *be* an encrypted text file — a note, a
+private key, an arbitrary secret blob — rather than a structured store.
 
 ### Writing a custom schema
 
@@ -298,6 +313,7 @@ credmgr vault create <name> --schema <your-schema-name>
 ```bash
 credmgr vault create work --schema credentials    # service logins
 credmgr vault create employee --schema env         # flat KEY=VALUE store
+credmgr vault create notes --schema text           # one encrypted text blob
 credmgr vault list                                  # shows each vault's active schema
 ```
 

@@ -9,7 +9,11 @@ Table, ...) those layers return.
 from __future__ import annotations
 
 import getpass
+import os
+import shlex
+import subprocess
 import sys
+import tempfile
 
 from rich import box
 from rich.console import Console
@@ -40,6 +44,47 @@ def prompt_new_password() -> str:
         if password == confirmation:
             return password
         print("Passwords do not match. Try again.")
+
+def open_editor(editor: str, initial_text: str = "") -> str:
+    """Open `editor` (the user's configured `credmgr config set editor
+    ...`, e.g. "vim", "code -w", "nano") on a private temp file seeded
+    with `initial_text`, wait for it to exit, and return whatever's in
+    the file afterwards.
+
+    The temp file is created 0600 and lives under the same tmp
+    directory Path.gettempdir() would use; it's removed again as soon
+    as the editor exits, whether or not the user saved anything.
+    """
+    fd, path = tempfile.mkstemp(prefix="credmgr-", suffix=".txt")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(initial_text)
+
+        try:
+            command = shlex.split(editor) + [path]
+        except ValueError as e:
+            fatal(f"Invalid editor command '{editor}': {e}")
+
+        try:
+            completed = subprocess.run(command)
+        except FileNotFoundError:
+            fatal(
+                f"Editor '{editor}' not found. Set a working one with "
+                f"'credmgr config set editor <command>', or set $VISUAL/$EDITOR."
+            )
+        except OSError as e:
+            fatal(f"Failed to launch editor '{editor}': {e}")
+        else:
+            if completed.returncode != 0:
+                fatal(f"Editor '{editor}' exited with a non-zero status ({completed.returncode}); nothing saved.")
+
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 def ask_choice(msg: str, choices: list, default=None):
     return Prompt.ask(msg, choices=choices, default=default)

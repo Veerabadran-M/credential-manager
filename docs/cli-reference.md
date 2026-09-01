@@ -69,13 +69,14 @@ their own `CredentialManager` methods.
 These commands are generic — their exact argument shape depends on the
 active vault's schema. Examples below assume the default `credentials`
 schema (`<service> [userid]`); for the `env` schema, substitute
-`<KEY> [VALUE]`. See [plugin-system.md](plugin-system.md) for schema
-details.
+`<KEY> [VALUE]`; for the `text` schema, substitute `[line|start-end]`
+(or no args at all — see below). See [plugin-system.md](plugin-system.md)
+for schema details.
 
 | Command | Description |
 |---|---|
 | `credmgr list` | List all stored entries in the *active* vault |
-| `credmgr list-all` | List every service and userid under it *(credentials schema)*, or every key *(env schema)* — across **every vault on disk**, not just the active one. Prompts for each vault's master password in turn (`*` marks the active vault, same as `vault list`) |
+| `credmgr list-all` | List every service and userid under it *(credentials schema)*, or every key *(env schema)* — across **every vault on disk**, not just the active one. Prompts for each vault's master password in turn (`*` marks the active vault, same as `vault list`). Not supported by the `text` schema |
 | `credmgr get <service> [userid]` | Display credentials in a table |
 | `credmgr search <query>` | Fuzzy search across entries |
 | `credmgr copy <service> [userid]` | Copy a value to the clipboard (auto-clears) |
@@ -91,6 +92,42 @@ details.
 | `credmgr export` | Print the entire vault as plaintext (always re-prompts for the password) |
 | `credmgr import <filepath>` | Import entries from a file, skipping duplicates/invalid entries |
 | `credmgr generate [--passphrase] [--length N] [--words N]` | Generate a password/passphrase without storing it |
+
+### The `text` schema
+
+A `text` vault has no keyed entries at all — the decrypted plaintext
+*is* the document, so the generic commands above are repurposed around
+line numbers purely for convenience:
+
+| Command | Description |
+|---|---|
+| `credmgr get` | Print the whole vault content |
+| `credmgr get <line>` / `credmgr get <start>-<end>` | Print one line or an inclusive range of lines (1-indexed) |
+| `credmgr search <text>` | Print every line containing `text` (case-insensitive), with line numbers |
+| `credmgr copy` | Copy the entire content to the clipboard |
+| `credmgr copy <line>` | Copy just that line |
+| `credmgr add <text...>` | Append `text...` as one new line |
+| `credmgr add <filepath>` | Upload/append the content of an existing file, verbatim (like `import`) |
+| `credmgr add` | Open `config.editor` on a blank temp file; whatever's saved is appended verbatim |
+| `credmgr update <text...>` | Replace the entire content with `text...` (pass `""` to clear it without a confirmation prompt) |
+| `credmgr update <filepath>` | Replace the entire content with an existing file's content, verbatim |
+| `credmgr update` | Open `config.editor` on a temp file pre-filled with the current content, so you edit it in place; whatever's saved replaces the vault |
+| `credmgr delete` | Clear the entire content (asks for confirmation first) |
+| `credmgr delete <line>` | Remove just that line, no confirmation needed |
+| `credmgr import <filepath>` | Append the file's content to whatever is already stored |
+| `credmgr export` | Print the raw content exactly as stored |
+
+`add`/`update <filepath>` only kick in when the single argument names a
+file that actually exists on disk (`os.path.isfile`) — anything else,
+including a nonexistent path, is treated as literal text instead. The
+editor used for the no-argument form is `config.editor`, which
+defaults to `$VISUAL`, then `$EDITOR`, then a platform default
+(`nano`, or `notepad` on Windows); override it with `credmgr config set
+editor <command>` (e.g. `vim`, `"code --wait"`).
+
+`list-all`, `history`, and `audit` aren't supported by `text`, and its
+vaults don't participate in `credmgr global` — there are no
+identifiers to index, only the content itself.
 
 Service/userid lookups (`get`, `copy`, `update`, `delete`, `history`) use
 progressively looser matching in the `credentials` schema: exact →
@@ -143,7 +180,7 @@ index.
 | `--words N` | `add`, `update`, `generate` | Generated passphrase word count |
 | `--notes "..."` / `-n` | `add` | Attach notes to a new entry |
 | `--backend NAME` | `init`, `vault create`, `migrate` | Choose a crypto backend non-interactively |
-| `--schema NAME` | `vault create` | Choose a schema for a new vault (default: `credentials`) |
+| `--schema NAME` | `vault create` | Choose a schema for a new vault (default: `credentials`; also `env`, `text`) |
 | `--skip-data-fetch` | `init` | Skip downloading optional security datasets |
 
 ## Examples
@@ -164,6 +201,17 @@ credmgr vault create work --schema credentials
 credmgr vault create employee --schema env
 credmgr vault use employee
 credmgr add EMPLOYEE_ID 123456
+credmgr vault use default
+
+# A vault that's just an encrypted text file
+credmgr vault create notes --schema text
+credmgr vault use notes
+credmgr add "server root password is in the safe"
+credmgr add ./private-key.pem       # uploads the file's content
+credmgr config set editor vim       # or "code --wait", etc. (default: $VISUAL/$EDITOR)
+credmgr add                         # opens $EDITOR on a blank file
+credmgr update                      # opens $EDITOR pre-filled with the current content
+credmgr get
 credmgr vault use default
 
 # Maintenance

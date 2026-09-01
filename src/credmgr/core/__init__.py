@@ -24,7 +24,7 @@ CLI) -- the two are unrelated concepts that happened to share a name.
 from __future__ import annotations
 
 from ..crypto import BackendUnavailableError, UnknownBackendError
-from ..schemas import SchemaError, SecretRequired, UnknownSchemaError
+from ..schemas import ContentRequired, SchemaError, SecretRequired, UnknownSchemaError
 from ..vault import AuthenticationError, VaultError
 from .manager import (CredentialManager, PasswordRequired, UnlockedVault,
                        VaultNotFound)
@@ -43,5 +43,6 @@ __all__ = [
     "UnknownBackendError",
     "SchemaError",
     "SecretRequired",
+    "ContentRequired",
     "UnknownSchemaError",
 ]
