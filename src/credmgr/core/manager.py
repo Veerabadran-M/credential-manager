@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .. import auth as auth_mod
-from .. import datasources, globalindex, vaultmgr
+from .. import datasources, globalsearch, vaultmgr
 from ..config import Configuration
 from ..config import config as _default_config
 from ..crypto.registry import get_backend, resolve_backend
@@ -77,6 +77,15 @@ class InitResult:
     fetch_results: list[FetchResult] | None  # None when data fetching was skipped
 
 @dataclass
+class TransferResult:
+    src: str
+    dst: str
+    schema: str
+    copied: bool                 # True = copy (source untouched), False = move
+    transferred: list[str]       # labels of entries written to the destination
+    skipped: list[str]           # labels left alone: already present in the destination
+
+@dataclass
 class VaultSummary:
     name: str
     schema: str
@@ -122,7 +131,6 @@ class CredentialManager:
         fetch_results = None if skip_data_fetch else self.fetch_data()
 
         vault.create(backend_name, master_password, "credentials")
-        globalindex.update_vault(self.config, vault.name, "credentials", get_schema("credentials").new_document())
         self.config.save()
 
         return InitResult(
@@ -183,7 +191,7 @@ class CredentialManager:
         if self.config.settings_file.exists():
             self.config.settings_file.unlink()
 
-    def generate_secret(self, *, passphrase: bool, length: int, words: int) -> str:
+    def generate_secret(self, *, passphrase: bool, length: int, words: int, special_chars: str | None = None) -> str:
         if length < 8:
             raise ValueError("Password length must be at least 8.")
         if length > 256:
@@ -192,8 +200,10 @@ class CredentialManager:
             raise ValueError("Passphrase word count must be between 3 and 12.")
 
         if passphrase:
+            if special_chars is not None:
+                raise ValueError("-spl/--special-chars only applies to passwords, not passphrases.")
             return generate_passphrase(words, self.config)
-        return generate_password(length)
+        return generate_password(length, special_chars)
 
     # ================================================================
     # Vault management
@@ -216,7 +226,6 @@ class CredentialManager:
         get_backend(backend_name)  # fail fast, before touching disk
 
         vault.create(backend_name, master_password, schema_name)
-        globalindex.update_vault(self.config, name, schema_name, get_schema(schema_name).new_document())
 
     def vault_list(self) -> list[VaultSummary]:
         return [
@@ -239,7 +248,6 @@ class CredentialManager:
         if name == self.config.active_vault:
             raise VaultManagerActiveVaultError(name)
         vaultmgr.delete_vault(self.config, name)
-        globalindex.remove_vault(self.config, name)
 
     # ================================================================
     # Authentication
@@ -252,12 +260,15 @@ class CredentialManager:
         password: str | None = None,
         fresh: bool = False,
         prompt: str | None = None,
+        remember: bool | None = None,
     ) -> UnlockedVault:
         """Resolve (dek, document, vault, schema) for `vault_name` (the
         active vault, by default). Tries the session cache first unless
         `fresh`; raises PasswordRequired if a password is needed and
         wasn't supplied; raises VaultNotFound if there's no vault there
-        at all."""
+        at all. After a password unlock the DEK is written to the
+        session cache unless `fresh` or `remember=False` (a cache that
+        already exists is still read either way)."""
         probe = Vault(self.config, name=vault_name)
         if not probe.exists():
             raise VaultNotFound(vault_name or self.config.active_vault)
@@ -271,15 +282,16 @@ class CredentialManager:
         if password is None:
             raise PasswordRequired(vault_name or self.config.active_vault, prompt)
 
-        dek, document, vault = auth_mod.authenticate(password, self.config, vault_name, remember=not fresh)
+        if remember is None:
+            remember = not fresh
+        dek, document, vault = auth_mod.authenticate(password, self.config, vault_name, remember=remember)
         return UnlockedVault(dek, document, vault, get_schema(vault.schema_name))
 
     def _save(self, unlocked: UnlockedVault) -> None:
         unlocked.vault.save(unlocked.document, unlocked.dek)
-        # The document just saved is already decrypted in memory, so the
-        # cross-vault search index can be kept in sync for free -- no
-        # extra unlock, no extra vault read.
-        globalindex.update_vault(self.config, unlocked.vault.name, unlocked.vault.schema_name, unlocked.document)
+        # Older versions kept a plaintext search index; get rid of it
+        # the first time we write anything.
+        globalsearch.purge_legacy_index(self.config)
 
     # ================================================================
     # Read/write operations on the active (or a named) vault
@@ -349,27 +361,75 @@ class CredentialManager:
         return u.schema.cmd_export(u.document, self.config)
 
     # ================================================================
-    # Cross-vault ("global") search
+    # Cross-vault ("global") search -- in memory only, nothing persisted
     # ================================================================
 
-    def stale_index_vaults(self) -> list[str]:
-        """Prune index entries for vaults no longer on disk, then return
-        the (possibly still-present) vault names whose index entries are
-        out of date and need `refresh_vault_index()` before a `global`
-        search can trust them."""
-        names = self.vault_names()
-        globalindex.prune_removed_vaults(self.config, names)
-        return globalindex.stale_vault_names(self.config, names)
+    def global_search_session(self, query: str) -> globalsearch.GlobalSearchSession:
+        """Start a cross-vault search. The caller drives it vault by
+        vault (see globalsearch.GlobalSearchSession) so it can prompt
+        for each master password as needed."""
+        globalsearch.purge_legacy_index(self.config)
+        return globalsearch.GlobalSearchSession(self, query)
 
-    def refresh_vault_index(self, vault_name: str, *, password: str | None = None, fresh: bool = False) -> None:
-        u = self.unlock(vault_name=vault_name, password=password, fresh=fresh,
-                         prompt=f"Master password for vault '{vault_name}' (index refresh): ")
-        globalindex.update_vault(self.config, vault_name, u.vault.schema_name, u.document)
+    # ================================================================
+    # Moving entries between vaults
+    # ================================================================
 
-    def index_search(self, query: str) -> list[dict]:
-        return globalindex.search(self.config, query)
+    def transfer(
+        self,
+        src_name: str,
+        dst_name: str,
+        args: list,
+        *,
+        copy: bool = False,
+        overwrite: bool = False,
+        src_password: str | None = None,
+        dst_password: str | None = None,
+    ) -> TransferResult:
+        """Move (or, with `copy=True`, copy) entries from one vault to
+        another vault *of the same schema*. `args` selects entries the
+        same way that schema's `get`/`delete` do; an empty list means
+        every entry. Entries keep all their data (history, timestamps).
 
-    def get_from_vault(self, vault_name: str, args: list, *, password: str | None = None, fresh: bool = False) -> CommandResult:
-        u = self.unlock(vault_name=vault_name, password=password, fresh=fresh,
-                         prompt=f"Password for vault \"{vault_name}\": ")
-        return u.schema.cmd_get(u.document, args, self.config)
+        Ordering is chosen so a failure can only ever leave an entry in
+        both vaults, never in neither: the destination is saved first,
+        and only entries actually written there are removed from the
+        source. Entries that already exist in the destination are left
+        in place in the source (reported as skipped) unless `overwrite`.
+        Raises PasswordRequired(vault_name) for whichever vault still
+        needs a password.
+        """
+        if src_name == dst_name:
+            raise VaultError("Source and destination vaults must be different.")
+        for name in (src_name, dst_name):
+            if not vaultmgr.vault_exists(self.config, name):
+                raise VaultNotFound(name)
+
+        src_schema_name = self.peek_schema(src_name)
+        dst_schema_name = self.peek_schema(dst_name)
+        if src_schema_name != dst_schema_name:
+            raise VaultError(
+                f"Schema mismatch: '{src_name}' is '{src_schema_name}' but '{dst_name}' is "
+                f"'{dst_schema_name}'. Entries can only be moved between vaults of the same schema."
+            )
+
+        src = self.unlock(vault_name=src_name, password=src_password,
+                          prompt=f"Master password for source vault '{src_name}': ")
+        dst = self.unlock(vault_name=dst_name, password=dst_password,
+                          prompt=f"Master password for destination vault '{dst_name}': ")
+
+        schema = src.schema
+        items = schema.transfer_select(src.document, args)
+        inserted, skipped = schema.transfer_insert(dst.document, items, overwrite=overwrite)
+
+        if inserted:
+            self._save(dst)          # 1. destination first ...
+        if inserted and not copy:
+            schema.transfer_remove(src.document, inserted)
+            self._save(src)          # 2. ... then drop from the source
+
+        return TransferResult(
+            src=src_name, dst=dst_name, schema=src_schema_name, copied=copy,
+            transferred=[schema.transfer_label(i) for i in inserted],
+            skipped=[schema.transfer_label(i) for i in skipped],
+        )

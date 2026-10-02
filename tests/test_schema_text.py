@@ -358,9 +358,9 @@ def test_cmd_export_returns_raw_content(schema, config):
 
 # ---- unsupported operations ----
 
-def test_index_entries_not_supported(schema):
+def test_search_entries_not_supported(schema):
     with pytest.raises(SchemaError):
-        schema.index_entries(TextDocument("x\n"))
+        schema.search_entries(TextDocument("x\n"))
 
 
 def test_cmd_list_all_not_supported(schema, config):

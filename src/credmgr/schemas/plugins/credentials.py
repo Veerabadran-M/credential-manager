@@ -9,6 +9,7 @@ printing or reading from the terminal; see schemas/base.py.
 
 from __future__ import annotations
 
+import copy
 import json
 import time
 
@@ -19,7 +20,7 @@ from ...models import Account, Credentials, PasswordHistoryEntry
 from ...search import (global_search, resolve_for_mutation, search_accounts,
                         search_services)
 from ...validation import validate_text
-from ..base import CommandResult, IndexEntry, Schema, SchemaError, SecretRequired, Table
+from ..base import CommandResult, SearchEntry, Schema, SchemaError, SecretRequired, Table
 
 MAX_LABEL_LENGTH = 128
 MAX_QUERY_LENGTH = 512
@@ -85,7 +86,13 @@ class CredentialsSchema(Schema):
 
         if opts.get("generate"):
             passphrase = opts.get("passphrase", False)
-            password = generate_passphrase(words) if passphrase else generate_password(length)
+            special_chars = opts.get("special_chars")
+            if passphrase and special_chars is not None:
+                raise SchemaError("-spl/--special-chars only applies to passwords, not passphrases.")
+            try:
+                password = generate_passphrase(words) if passphrase else generate_password(length, special_chars)
+            except ValueError as e:
+                raise SchemaError(str(e)) from e
             label = "Passphrase" if passphrase else "Password"
             result.say(f"Generated {label}: {password}", "bold cyan")
             _clipboard_lines(result, copy_to_clipboard(password, label=label))
@@ -453,15 +460,59 @@ class CredentialsSchema(Schema):
     def cmd_export(self, document: Credentials, config) -> CommandResult:
         return CommandResult(raw=json.dumps(document.to_dict(), indent=4))
 
-    # ---- global (cross-vault) search index ----
+    # ---- global (cross-vault) search ----
 
-    def index_entries(self, document: Credentials) -> list[IndexEntry]:
+    def search_entries(self, document: Credentials) -> list[SearchEntry]:
         entries = []
         for service, accounts in document.services.items():
             for acc in accounts:
-                entries.append(IndexEntry(
+                entries.append(SearchEntry(
                     fields={"service": service, "userid": acc.userid},
                     summary=[("Service", service), ("User ID", acc.userid)],
                     args=[service, acc.userid],
                 ))
         return entries
+
+    # ---- moving entries between vaults (`credmgr transfer`) ----
+    # An item is a (service, Account) pair.
+
+    def transfer_select(self, document: Credentials, args) -> list:
+        if len(args) > 2:
+            raise SchemaError("Usage: <service> [userid]  (or nothing, with --all)")
+        if not document.services:
+            raise SchemaError("No services stored.")
+        if not args:
+            return [(svc, acc) for svc, accounts in document.services.items() for acc in accounts]
+
+        service, userid = args[0], (args[1] if len(args) == 2 else None)
+        _validate_service_user(service, userid)
+        svc, accounts, acc = resolve_for_mutation(document, service, userid)
+        return [(svc, a) for a in accounts] if acc is None else [(svc, acc)]
+
+    def transfer_label(self, item) -> str:
+        service, acc = item
+        return f"{service}/{acc.userid}"
+
+    def transfer_insert(self, document: Credentials, items, overwrite: bool = False):
+        inserted, skipped = [], []
+        for service, acc in items:
+            existing = document.services.setdefault(service, [])
+            clash = next((i for i, a in enumerate(existing) if a.userid.lower() == acc.userid.lower()), None)
+            if clash is None:
+                existing.append(copy.deepcopy(acc))
+            elif overwrite:
+                existing[clash] = copy.deepcopy(acc)
+            else:
+                skipped.append((service, acc))
+                if not existing:  # don't leave an empty service behind
+                    del document.services[service]
+                continue
+            inserted.append((service, acc))
+        return inserted, skipped
+
+    def transfer_remove(self, document: Credentials, items) -> None:
+        for service, acc in items:
+            accounts = document.services.get(service, [])
+            accounts[:] = [a for a in accounts if a is not acc]
+            if not accounts:
+                document.services.pop(service, None)

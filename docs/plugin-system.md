@@ -205,15 +205,23 @@ class Schema(ABC):
     def cmd_import(self, document, filepath, config) -> CommandResult: ...
     def cmd_export(self, document, config) -> CommandResult: ...
 
-    # Cross-vault search index for `credmgr global` (see globalindex.py).
+    # Cross-vault search for `credmgr global` (see globalsearch.py).
     # Default raises SchemaError, same as the cmd_* methods -- a schema
     # that doesn't implement this just doesn't participate in `global`.
-    def index_entries(self, document) -> list[IndexEntry]: ...
+    def search_entries(self, document) -> list[SearchEntry]: ...
+
+    # Moving entries between two vaults of this schema (`credmgr transfer`).
+    # Defaults raise SchemaError -- a schema that doesn't implement them
+    # just doesn't support `transfer`.
+    def transfer_select(self, document, args) -> list: ...
+    def transfer_label(self, item) -> str: ...
+    def transfer_insert(self, document, items, overwrite=False) -> tuple[list, list]: ...
+    def transfer_remove(self, document, items) -> None: ...
 ```
 
 `core/manager.py`'s `CredentialManager` collects raw CLI arguments and
 shared option flags (`generate`, `passphrase`, `length`, `words`,
-`notes`) and hands them, unopinionated, to whichever `cmd_*` method the
+`special_chars`, `notes`) and hands them, unopinionated, to whichever `cmd_*` method the
 invoked command maps to. It persists the vault whenever the returned
 `CommandResult.mutated` is `True`. A schema that doesn't support an
 operation simply doesn't override it — the default raises `SchemaError`,
@@ -231,55 +239,70 @@ config)` once per vault, against whichever schema that vault happens to
 use, printing a header line between vaults. Everything else operates on
 the single active vault.
 
-### `index_entries` and the `global` command
+### `search_entries` and the `global` command
 
 `credmgr global <query>` (see [cli-reference.md](cli-reference.md)) is
 schema-agnostic in the same way: it never branches on which schema a
-vault uses. What makes that possible is `index_entries`, and one small
+vault uses. What makes that possible is `search_entries`, and one small
 data class, both in `schemas/base.py`:
 
 ```python
 @dataclass
-class IndexEntry:
+class SearchEntry:
     fields: dict[str, str]        # matched case-insensitively/partially by `global`
     summary: list[tuple[str, str]]  # ordered (label, value) shown once a search narrows to this entry
-    args: list[str]               # resolves this entry via this schema's own cmd_get, post-unlock
+    args: list[str]               # resolves this entry via this schema's own cmd_get
 ```
 
-`index_entries(self, document) -> list[IndexEntry]` returns one
-`IndexEntry` per searchable item in a document. `credmgr/globalindex.py`
-calls it right after any command saves a vault, and stores the result
-(vault name, schema name, and the raw `fields`/`summary`/`args`) in
-`~/.credmgr/index.json` — plaintext, but containing only identifiers,
-never secrets. `credentials` indexes one entry per `(service, userid)`
-pair; `env` indexes one entry per key. Neither schema needs to know
-`global` exists beyond implementing this one method — `globalindex.py`
-and the `global` command never import or special-case either
-plugin.
+`search_entries(self, document) -> list[SearchEntry]` returns one
+`SearchEntry` per searchable item in an **already-unlocked** document.
+`credmgr/globalsearch.py` calls it in memory during a `global` run and
+throws the result away; nothing is stored. Entries must contain only
+identifiers, never secrets. `credentials` yields one entry per
+`(service, userid)` pair; `env` one per key. Neither schema needs to
+know `global` exists beyond implementing this one method.
 
-Once a search narrows down to one entry and the user picks it,
-`CredentialManager.get_from_vault()` unlocks *only* that entry's vault
-and calls `schema.cmd_get(document, entry.args, config)` — the same
-`cmd_get` every schema already implements for the plain `get` command.
-That's the whole "resolve a selected entry after unlock" step: no new
-dispatch path, no schema-specific branching in `global` itself.
+When the user picks a match, the session calls
+`schema.cmd_get(document, entry.args, config)` on the vault it already
+has unlocked — the same `cmd_get` every schema implements for the plain
+`get` command. No new dispatch path, no schema-specific branching in
+`global` itself.
 
-A schema that doesn't override `index_entries` (the default raises
-`SchemaError`) simply never contributes entries to the index — its
-vaults are silently skipped by `global`, not crashed on.
+A schema that doesn't override `search_entries` (the default raises
+`SchemaError`; `Schema.supports_global_search()` reports it) is skipped
+by `global` without being unlocked.
+
+> **Upgrading a plugin:** `index_entries`/`IndexEntry` were renamed to
+> `search_entries`/`SearchEntry` when the on-disk index was removed. A
+> third-party schema that still defines `index_entries` will silently
+> stop being searched until it is renamed.
+
+### `transfer_*` and the `transfer` command
+
+`credmgr transfer <src> <dst> ...` moves entries between two vaults of
+the same schema without knowing what an "entry" is. A schema opts in by
+implementing four methods that work on opaque *items*:
+
+- `transfer_select(document, args)` — resolve the user's args (same shape as `get`/`delete`; empty = everything) to items. Items must carry the entry's complete data (history, timestamps, ...).
+- `transfer_label(item)` — a secret-free label for output.
+- `transfer_insert(document, items, overwrite=False)` — add deep copies to the destination; return `(inserted, skipped)`, skipping (not overwriting) entries that already exist unless `overwrite`.
+- `transfer_remove(document, items)` — delete from the source the items that were selected from it.
+
+`CredentialManager.transfer()` saves the destination before touching the
+source and removes only what was actually inserted.
 
 ### Bundled schemas
 
 | Schema | Document | Supports |
 |---|---|---|
-| `credentials` (default) | `Credentials` — a `service → [Account, ...]` tree, each `Account` carrying userid/password/notes/history | All commands, including `audit` and `history`; indexed for `global` by `(service, userid)` |
-| `env` | `EnvDocument` — an ordered list of `(key, value)` pairs | `list`, `list-all`, `get`, `search`, `copy`, `add`, `update`, `delete`, `import`, `export` (no `audit`/`history`); indexed for `global` by `key` |
-| `text` | `TextDocument` — one undivided string, the vault's entire decrypted content | `list`, `get`, `search`, `copy`, `add`, `update`, `delete`, `import`, `export` (no `list-all`/`audit`/`history`, and not indexed for `global` — there are no identifiers to index) |
+| `credentials` (default) | `Credentials` — a `service → [Account, ...]` tree, each `Account` carrying userid/password/notes/history | All commands, including `audit` and `history`; searchable by `global` by `(service, userid)`; supports `transfer` |
+| `env` | `EnvDocument` — an ordered list of `(key, value)` pairs | `list`, `list-all`, `get`, `search`, `copy`, `add`, `update`, `delete`, `import`, `export` (no `audit`/`history`); searchable by `global` by `key`; supports `transfer` |
+| `text` | `TextDocument` — one undivided string, the vault's entire decrypted content | `list`, `get`, `search`, `copy`, `add`, `update`, `delete`, `import`, `export` (no `list-all`/`audit`/`history`, and not searchable by `global` or movable with `transfer` — there are no identifiers to search or select) |
 
 `list-all` prints a bare, unfiltered per-vault listing shaped by the
 schema: every service with every userid under it (`credentials`), or
 every key (`env`) — no counts, no truncation, just the identifiers.
-The `text` schema doesn't implement `list-all` (or `global` indexing)
+The `text` schema doesn't implement `list-all` (or `global`/`transfer` support)
 at all, since it has no keyed entries to list.
 
 The `env` schema's on-disk plaintext (before encryption) is a flat

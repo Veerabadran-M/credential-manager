@@ -48,6 +48,55 @@ def test_generate_password_minimum_length_still_satisfies_all_classes():
     assert any(c in string.punctuation for c in pwd)
 
 
+# ---- generate_password: restricted special characters (-spl) ----
+
+def test_generate_password_restricted_specials_only_uses_given_set():
+    allowed = "!@#"
+    for _ in range(200):
+        pwd = generate_password(24, allowed)
+        extras = {c for c in pwd if c in string.punctuation}
+        assert extras and extras <= set(allowed)
+        assert set(pwd) <= set(string.ascii_letters + string.digits + allowed)
+
+
+def test_generate_password_restricted_specials_still_has_every_class():
+    pwd = generate_password(8, "_")
+    assert len(pwd) == 8
+    assert any(c.islower() for c in pwd)
+    assert any(c.isupper() for c in pwd)
+    assert any(c.isdigit() for c in pwd)
+    assert "_" in pwd
+
+
+def test_generate_password_single_special_char_that_looks_like_a_flag():
+    assert "-" in generate_password(16, "-")
+
+
+def test_generate_password_empty_special_set_means_alphanumeric_only():
+    for _ in range(50):
+        pwd = generate_password(16, "")
+        assert pwd.isalnum()
+        assert any(c.islower() for c in pwd) and any(c.isupper() for c in pwd) and any(c.isdigit() for c in pwd)
+
+
+def test_generate_password_duplicate_specials_are_fine():
+    pwd = generate_password(20, "!!!!")
+    assert set(c for c in pwd if c in string.punctuation) == {"!"}
+
+
+@pytest.mark.parametrize("bad", ["a", "1", "!a", "! ", "é", "\t", "€"])
+def test_generate_password_rejects_non_symbol_specials(bad):
+    with pytest.raises(ValueError):
+        generate_password(20, bad)
+
+
+def test_generate_password_all_allowed_specials_eventually_appear():
+    seen = set()
+    for _ in range(300):
+        seen |= {c for c in generate_password(20, "!@#") if c in "!@#"}
+    assert seen == set("!@#")
+
+
 # ---- generate_passphrase ----
 
 def test_generate_passphrase_word_count_and_separator():

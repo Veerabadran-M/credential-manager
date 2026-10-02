@@ -272,9 +272,9 @@ def cmd_config_reset() -> None:
     manager.config_reset()
     console.print("Configuration reset to defaults.", style="bold green")
 
-def cmd_generate(passphrase: bool, length: int, words: int) -> str:
+def cmd_generate(passphrase: bool, length: int, words: int, special_chars: str | None = None) -> str:
     try:
-        value = manager.generate_secret(passphrase=passphrase, length=length, words=words)
+        value = manager.generate_secret(passphrase=passphrase, length=length, words=words, special_chars=special_chars)
     except ValueError as e:
         fatal(str(e))
     label = "Passphrase" if passphrase else "Password"
@@ -411,9 +411,13 @@ def migrate_cmd(
 def generate_cmd(
     passphrase: bool = typer.Option(False, "--passphrase"),
     length: int = typer.Option(config.password_length, "--length", metavar="N"),
-    words: int = typer.Option(config.passphrase_num_word, "--words", metavar="N")
+    words: int = typer.Option(config.passphrase_num_word, "--words", metavar="N"),
+    special_chars: Optional[str] = typer.Option(
+        None, "-spl", "--special-chars", metavar="CHARS",
+        help="Only use these special characters (e.g. -spl '!@#'); empty string = no specials. Default: all punctuation",
+    )
 ) -> None:
-    cmd_generate(passphrase, length, words)
+    cmd_generate(passphrase, length, words, special_chars)
 
 ''' -------- config sub-app -------- '''
 
@@ -496,83 +500,139 @@ def list_all_cmd() -> None:
 
 ''' ------------------------------ COMMANDS: GLOBAL (CROSS-VAULT) SEARCH ------------------------------ '''
 
-def _ensure_index_fresh(names: list) -> None:
-    """Bring the metadata index up to date before a global search.
+def _search_one_vault(session, name: str) -> list:
+    """Search a single vault for `global`, prompting for its master
+    password if no session key covers it. A vault that can't be searched
+    (blank password, wrong password, unreadable, ...) is skipped with a
+    warning instead of aborting the whole search."""
+    password = None
+    while True:
+        try:
+            return session.search_vault(name, password=password)
+        except PasswordRequired as e:
+            prompt = e.prompt.rstrip().rstrip(":") + " (blank to skip): "
+            password = safe_getpass(prompt)
+            if not password:
+                console.print(f"Skipped vault '{name}'.", style="yellow", markup=False)
+                return []
+        except (AuthenticationError, VaultError, VaultNotFound, UnknownSchemaError,
+                BackendUnavailableError, UnknownBackendError) as e:
+            console.print(f"Skipped vault '{name}': {e}", style="yellow", markup=False)
+            return []
 
-    Prunes vaults that no longer exist, then re-derives metadata only
-    for vaults CredentialManager flags as out of sync (missing from the
-    index, changed on disk, or hand-edited). Vaults that are already up
-    to date are never touched or unlocked -- this is what keeps `global`
-    fast even with many vaults.
-    """
-    stale = manager.stale_index_vaults()
-    if not stale:
-        return
+def _render_match_row(index: int, match) -> str:
+    fields = "  ".join(value for _label, value in match.summary)
+    return f"  {index}. {match.vault:<12} {match.schema:<12} {fields}"
 
-    console.print("Refreshing the search index for out-of-date vaults\u2026", style="dim")
-    for name in stale:
-        _call(manager.refresh_vault_index, name, password=None)
-
-def _render_match_row(index: int, match: dict) -> str:
-    fields = "  ".join(value for _label, value in match["summary"])
-    return f"  {index}. {match['vault']:<12} {match['schema']:<12} {fields}"
-
-def _render_match_details(match: dict) -> None:
-    console.print(f"Vault    : [bold cyan]{match['vault']}[/bold cyan]")
-    console.print(f"Schema   : {match['schema']}")
-    for label, value in match["summary"]:
+def _render_match_details(match) -> None:
+    console.print(f"Vault    : [bold cyan]{match.vault}[/bold cyan]")
+    console.print(f"Schema   : {match.schema}")
+    for label, value in match.summary:
         console.print(f"{label:<9}: {value}")
 
 def cmd_global(query: str) -> None:
-    """Search every vault's metadata index for `query` without unlocking
-    or switching any vault, then unlock only the single vault the user
-    selects to retrieve the actual secret. See globalindex.py."""
-    query = (query or "").strip()
-    if not query:
-        fatal("Usage: credmgr global <query>")
-
+    """Search every vault for `query` without writing anything to
+    disk: each vault is unlocked in turn (session key or master
+    password), searched in memory, and dropped unless it has a hit. The
+    chosen match is then read from the copy that's already unlocked --
+    no index, no second prompt. See globalsearch.py."""
     names = manager.vault_names()
     if not names:
         console.print("No vaults found. Run 'credmgr vault create <name>' to make one.", style="bold yellow")
         return
 
-    _ensure_index_fresh(names)
-    matches = manager.index_search(query)
+    try:
+        session = manager.global_search_session(query)
+    except SchemaError as e:
+        fatal(str(e))
 
-    if not matches:
-        console.print("No matching entries found.", style="bold yellow")
-        return
+    try:
+        matches = []
+        for name in names:
+            matches.extend(_search_one_vault(session, name))
 
-    if len(matches) == 1:
-        match = matches[0]
-        console.print("\nFound 1 match\n", style="bold cyan")
-        _render_match_details(match)
-        choice = ask_choice("\nView this secret?", ["y", "n"], "y")
-        if choice != "y":
+        if not matches:
+            console.print("No matching entries found.", style="bold yellow")
             return
-    else:
-        console.print(f"\n[bold cyan]Found {len(matches)} matches[/bold cyan]\n")
-        for i, m in enumerate(matches, start=1):
-            console.print(_render_match_row(i, m))
-        console.print()
+
+        if len(matches) == 1:
+            match = matches[0]
+            console.print("\nFound 1 match\n", style="bold cyan")
+            _render_match_details(match)
+            choice = ask_choice("\nView this secret?", ["y", "n"], "y")
+            if choice != "y":
+                return
+        else:
+            console.print(f"\n[bold cyan]Found {len(matches)} matches[/bold cyan]\n")
+            for i, m in enumerate(matches, start=1):
+                console.print(_render_match_row(i, m))
+            console.print()
+            try:
+                raw = input("Select an entry: ").strip()
+            except KeyboardInterrupt:
+                print()
+                return
+            if not raw.isdigit() or not (1 <= int(raw) <= len(matches)):
+                console.print("Invalid selection.", style="bold red")
+                return
+            match = matches[int(raw) - 1]
+
         try:
-            raw = input("Select an entry: ").strip()
-        except KeyboardInterrupt:
-            print()
-            return
-        if not raw.isdigit() or not (1 <= int(raw) <= len(matches)):
-            console.print("Invalid selection.", style="bold red")
-            return
-        match = matches[int(raw) - 1]
+            _render(session.get(match))
+        except SchemaError as e:
+            fatal(str(e))
+    finally:
+        session.close()
 
-    # Only the selected vault is ever unlocked; the active vault (and
-    # every other vault) is left completely untouched.
-    result = _call(manager.get_from_vault, match["vault"], match["args"], password=None)
-    _render(result)
-
-@app.command(name="global", help="Search for an entry across every vault via the metadata index, then unlock only the matching vault")
+@app.command(name="global", help="Search for an entry across every vault (unlocks each one in memory; nothing is indexed or stored)")
 def global_cmd(query: str) -> None:
     cmd_global(query)
+
+''' ------------------------------ COMMANDS: TRANSFER BETWEEN VAULTS ------------------------------ '''
+
+def cmd_transfer(src: str, dst: str, args: list, all_entries: bool, copy: bool, overwrite: bool) -> None:
+    if all_entries and args:
+        fatal("Use either entry arguments or --all, not both.")
+    if not all_entries and not args:
+        fatal("Say what to transfer (e.g. <service> [userid], or <KEY>), or use --all for every entry.")
+
+    kwargs: dict = {}
+    try:
+        while True:
+            try:
+                result = manager.transfer(src, dst, args, copy=copy, overwrite=overwrite, **kwargs)
+                break
+            except PasswordRequired as e:
+                key = "src_password" if e.vault_name == src else "dst_password"
+                kwargs[key] = safe_getpass(e.prompt)
+    except (SchemaError, VaultError, AuthenticationError, BackendUnavailableError,
+            UnknownBackendError, VaultManagerError, VaultNotFound) as e:
+        fatal(str(e))
+
+    verb = "Copied" if result.copied else "Moved"
+    if result.transferred:
+        console.print(f"{verb} {len(result.transferred)} entr{'y' if len(result.transferred) == 1 else 'ies'} "
+                      f"from '{result.src}' to '{result.dst}':", style="bold green", markup=False)
+        for label in result.transferred:
+            console.print(f"  - {label}", markup=False)
+    if result.skipped:
+        console.print(f"Skipped {len(result.skipped)} already present in '{result.dst}' "
+                      f"(left in '{result.src}'; use --overwrite to replace):", style="bold yellow", markup=False)
+        for label in result.skipped:
+            console.print(f"  - {label}", markup=False)
+    if not result.transferred and not result.skipped:
+        console.print("Nothing to transfer.", style="bold yellow")
+
+@app.command(name="transfer", help="Move entries from one vault to another vault of the same schema; args select entries, e.g. <service> [userid] or <KEY>")
+def transfer_cmd(
+    src: str = typer.Argument(..., metavar="SRC_VAULT"),
+    dst: str = typer.Argument(..., metavar="DST_VAULT"),
+    args: Optional[List[str]] = typer.Argument(None, metavar="[ENTRY...]"),
+    all_entries: bool = typer.Option(False, "--all", help="Transfer every entry in the source vault"),
+    copy: bool = typer.Option(False, "--copy", help="Copy instead of move (leave the source untouched)"),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Replace entries that already exist in the destination"),
+) -> None:
+    cmd_transfer(src, dst, list(args or []), all_entries, copy, overwrite)
 
 @app.command(name="audit", help="Run a password health audit (credentials schema only)")
 def audit_cmd() -> None:
@@ -632,11 +692,15 @@ def add_cmd(
     passphrase: bool = typer.Option(False, "--passphrase"),
     length: int = typer.Option(config.password_length, "--length", metavar="N"),
     words: int = typer.Option(config.passphrase_num_word, "--words", metavar="N"),
-    notes: str = typer.Option("", "--notes", "-n", metavar="TEXT")
+    notes: str = typer.Option("", "--notes", "-n", metavar="TEXT"),
+    special_chars: Optional[str] = typer.Option(
+        None, "-spl", "--special-chars", metavar="CHARS",
+        help="Only use these special characters (e.g. -spl '!@#'); empty string = no specials. Default: all punctuation",
+    )
 ) -> None:
     if not manager.vault_exists():
         fatal(_load_vault_not_found_message(config.active_vault))
-    opts = {"generate": generate, "passphrase": passphrase, "length": length, "words": words, "notes": notes}
+    opts = {"generate": generate, "passphrase": passphrase, "length": length, "words": words, "notes": notes, "special_chars": special_chars}
     _render(_call(manager.add, args or [], opts=opts, password=None))
 
 @app.command(name="update", help="Update an existing entry; args are schema-specific, e.g. <service> <userid> <field> [new_value], <KEY> <VALUE>, or (text schema) a filepath/string/nothing")
@@ -645,11 +709,15 @@ def update_cmd(
     generate: bool = typer.Option(False, "--generate"),
     passphrase: bool = typer.Option(False, "--passphrase"),
     length: int = typer.Option(config.password_length, "--length", metavar="N"),
-    words: int = typer.Option(config.passphrase_num_word, "--words", metavar="N")
+    words: int = typer.Option(config.passphrase_num_word, "--words", metavar="N"),
+    special_chars: Optional[str] = typer.Option(
+        None, "-spl", "--special-chars", metavar="CHARS",
+        help="Only use these special characters (e.g. -spl '!@#'); empty string = no specials. Default: all punctuation",
+    )
 ) -> None:
     if not manager.vault_exists():
         fatal(_load_vault_not_found_message(config.active_vault))
-    opts = {"generate": generate, "passphrase": passphrase, "length": length, "words": words}
+    opts = {"generate": generate, "passphrase": passphrase, "length": length, "words": words, "special_chars": special_chars}
     _render(_call(manager.update, args or [], opts=opts, password=None))
 
 @app.command(name="delete", help="Delete an entry; args are schema-specific, e.g. <service> [userid] or <KEY>")

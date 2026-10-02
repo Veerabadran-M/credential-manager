@@ -1,11 +1,11 @@
 """Integration tests for `credmgr global <query>` through the actual
 Typer CLI app -- multiple real (encrypted) vaults on disk, driven via
-`CliRunner`, exercising the whole flow: index search, interactive
-match selection, authenticating only the selected vault, and leaving
-the active vault/config untouched.
+`CliRunner`, exercising the whole flow: in-memory search across every
+vault, interactive match selection, and leaving the active vault/config
+untouched. Nothing is indexed or persisted by a global search.
 
 `credmgr.config.config` is a process-wide singleton that `cli/commands.py`,
-`auth.py`, and `globalindex.py` all import the *same instance* of, so
+`auth.py`, and `globalsearch.py` all import the *same instance* of, so
 each test redirects it at a throwaway `tmp_path` via the `redirect_config`
 fixture rather than trying to swap the module-level name.
 """
@@ -21,7 +21,6 @@ import credmgr.auth as auth_mod
 import credmgr.cli.commands as cli_commands_mod
 import credmgr.schemas.plugins.credentials as credentials_mod
 import credmgr.schemas.plugins.env as env_mod
-from credmgr import globalindex
 from credmgr.cli import app
 from credmgr.config import config as real_config
 from credmgr.schemas.plugins.credentials import CredentialsSchema
@@ -37,7 +36,7 @@ GEN_OPTS = {"generate": True, "length": 16, "words": 5}
 @pytest.fixture(autouse=True)
 def redirect_config(tmp_path, monkeypatch):
     """Point the real config singleton (shared by cli/commands.py, auth.py,
-    core/manager.py, and globalindex.py) at a throwaway directory,
+    core/manager.py, and globalsearch.py) at a throwaway directory,
     and never touch the real clipboard or session cache."""
     monkeypatch.setattr(real_config, "master_dir", tmp_path / ".credmgr")
     monkeypatch.setattr(real_config, "active_vault", "default")
@@ -61,14 +60,12 @@ def redirect_config(tmp_path, monkeypatch):
 
 def _seed_vault(config, name, backend_name, schema_name, password, populate):
     """Create a real encrypted vault, populate it via the schema (like a
-    normal `add` would), save it, and update the search index -- exactly
-    what core/manager.py's mutation hooks do after every add/update/delete."""
+    normal `add` would) and save it."""
     vault = Vault(config, name=name)
     dek = vault.create(backend_name, password, schema_name)
     document = vault.unlock_with_dek(dek)
     populate(document)
     vault.save(document, dek)
-    globalindex.update_vault(config, name, schema_name, document)
 
 
 @pytest.fixture
@@ -95,15 +92,18 @@ def test_global_with_no_vaults_reports_none_found(redirect_config):
 
 
 def test_global_with_no_matching_entries(two_vaults):
-    result = runner.invoke(app, ["global", "totally-nonexistent-query"])
+    result = runner.invoke(app, ["global", "totally-nonexistent-query"], input="pw-personal\npw-research\n")
     assert result.exit_code == 0
     assert "No matching entries found." in result.output
 
 
 # ---- single match ----
+# Every searchable vault is unlocked in turn (sorted by name: personal,
+# research), so the scripted input is "<personal pw>\n<research pw>\n"
+# followed by the answer to "View this secret?".
 
 def test_global_single_match_confirmed_retrieves_secret(two_vaults):
-    result = runner.invoke(app, ["global", "OPEN"], input="y\npw-research\n")
+    result = runner.invoke(app, ["global", "OPEN"], input="pw-personal\npw-research\ny\n")
     assert result.exit_code == 0, result.output
     assert "Found 1 match" in result.output
     assert "research" in result.output
@@ -111,17 +111,42 @@ def test_global_single_match_confirmed_retrieves_secret(two_vaults):
     assert "sk-super-secret" in result.output
 
 
-def test_global_single_match_declined_does_not_prompt_for_password(two_vaults):
-    result = runner.invoke(app, ["global", "OPEN"], input="n\n")
+def test_global_single_match_declined_does_not_show_secret(two_vaults):
+    result = runner.invoke(app, ["global", "OPEN"], input="pw-personal\npw-research\nn\n")
     assert result.exit_code == 0, result.output
     assert "Found 1 match" in result.output
     assert "sk-super-secret" not in result.output
 
 
-def test_global_single_match_wrong_password_terminates(two_vaults):
-    result = runner.invoke(app, ["global", "OPEN"], input="y\nwrong-password\n")
-    assert result.exit_code != 0
+def test_global_does_not_prompt_a_second_time_for_selected_vault(two_vaults):
+    # Session caching is disabled in these tests, so a second prompt
+    # would consume "y" as a password and break the flow.
+    result = runner.invoke(app, ["global", "OPEN"], input="pw-personal\npw-research\ny\n")
+    assert "sk-super-secret" in result.output
+
+
+def test_global_wrong_password_skips_that_vault_only(two_vaults):
+    result = runner.invoke(app, ["global", "OPEN"], input="pw-personal\nwrong-password\n")
+    assert result.exit_code == 0, result.output
+    assert "Skipped vault 'research'" in result.output
+    assert "No matching entries found." in result.output
     assert "sk-super-secret" not in result.output
+
+
+def test_global_blank_password_skips_vault(two_vaults):
+    result = runner.invoke(app, ["global", "OPEN"], input="\n\n")
+    assert result.exit_code == 0, result.output
+    assert "Skipped vault 'personal'" in result.output
+    assert "Skipped vault 'research'" in result.output
+    assert "No matching entries found." in result.output
+
+
+def test_global_does_not_unlock_vaults_whose_schema_cannot_be_searched(redirect_config, available_backend_name):
+    config = redirect_config
+    _seed_vault(config, "notes", available_backend_name, "text", "pw-notes", lambda doc: None)
+    result = runner.invoke(app, ["global", "anything"])  # no input: any prompt would hit EOF
+    assert result.exit_code == 0, result.output
+    assert "No matching entries found." in result.output
 
 
 # ---- multiple matches ----
@@ -134,7 +159,7 @@ def test_global_multiple_matches_lists_and_selects_by_number(two_vaults):
 
     _seed_vault(config, "servers", _first_backend(), "credentials", "pw-servers", populate)
 
-    result = runner.invoke(app, ["global", "git"])
+    result = runner.invoke(app, ["global", "git"], input="pw-personal\npw-research\npw-servers\n\n")
     assert "Found 2 matches" in result.output
     assert "1. personal" in result.output
     assert "2. servers" in result.output
@@ -148,7 +173,7 @@ def test_global_multiple_matches_invalid_selection_is_reported(two_vaults):
 
     _seed_vault(config, "servers", _first_backend(), "credentials", "pw-servers", populate)
 
-    result = runner.invoke(app, ["global", "git"], input="9\n")
+    result = runner.invoke(app, ["global", "git"], input="pw-personal\npw-research\npw-servers\n9\n")
     assert "Invalid selection." in result.output
 
 
@@ -160,7 +185,7 @@ def test_global_multiple_matches_selection_retrieves_correct_vault(two_vaults):
 
     _seed_vault(config, "servers", _first_backend(), "credentials", "pw-servers", populate)
 
-    result = runner.invoke(app, ["global", "git"], input="2\npw-servers\n")
+    result = runner.invoke(app, ["global", "git"], input="pw-personal\npw-research\npw-servers\n2\n")
     assert result.exit_code == 0, result.output
     assert "github-enterprise" in result.output
     assert "admin" in result.output
@@ -172,35 +197,55 @@ def test_global_never_changes_the_active_vault(two_vaults):
     config = two_vaults
     config.active_vault = "personal"
 
-    runner.invoke(app, ["global", "OPEN"], input="y\npw-research\n")
+    runner.invoke(app, ["global", "OPEN"], input="pw-personal\npw-research\ny\n")
 
     assert config.active_vault == "personal"
 
 
 def test_global_never_writes_config_file(two_vaults):
     config = two_vaults
-    runner.invoke(app, ["global", "OPEN"], input="y\npw-research\n")
+    runner.invoke(app, ["global", "OPEN"], input="pw-personal\npw-research\ny\n")
     assert not config.settings_file.exists()
 
 
-# ---- index freshness ----
+# ---- nothing persisted ----
 
-def test_global_finds_entries_added_outside_cli_after_index_refresh(two_vaults, available_backend_name):
-    """Simulate a vault whose contents changed without the index being
-    told (e.g. hand-edited, or an older credmgr build) -- `global` must
-    notice via stale_vault_names() and re-index it before searching."""
+def test_global_finds_entries_added_outside_the_cli(two_vaults):
+    """No index to go stale: whatever is in the vault right now is searched."""
     config = two_vaults
 
     vault = Vault(config, name="personal")
     dek, document = vault.unlock("pw-personal")
     CredentialsSchema().cmd_add(document, ["newsvc", "carol"], GEN_OPTS, config)
     vault.save(document, dek)
-    # Deliberately do NOT call globalindex.update_vault() here -- the
-    # index now disagrees with vault.json's mtime.
 
-    result = runner.invoke(app, ["global", "newsvc"], input="pw-personal\ny\npw-personal\n")
+    result = runner.invoke(app, ["global", "newsvc"], input="pw-personal\npw-research\nn\n")
     assert "Found 1 match" in result.output
     assert "newsvc" in result.output
+
+
+def test_global_writes_no_index_file(two_vaults):
+    config = two_vaults
+    runner.invoke(app, ["global", "OPEN"], input="pw-personal\npw-research\nn\n")
+    assert not (config.master_dir / "index.json").exists()
+    assert not any("index" in p.name for p in config.master_dir.rglob("*"))
+
+
+def test_global_never_stores_identifiers_outside_the_encrypted_vaults(two_vaults):
+    config = two_vaults
+    runner.invoke(app, ["global", "OPEN"], input="pw-personal\npw-research\ny\n")
+    for path in config.master_dir.rglob("*"):
+        if path.is_file() and path.name not in ("vault.json", "vault.bak"):
+            data = path.read_bytes()
+            assert b"OPENAI_API_KEY" not in data and b"github" not in data
+
+
+def test_global_removes_legacy_plaintext_index(two_vaults):
+    config = two_vaults
+    legacy = config.master_dir / "index.json"
+    legacy.write_text('{"version": 1, "vaults": {"personal": {"entries": [{"fields": {"service": "github"}}]}}}')
+    runner.invoke(app, ["global", "OPEN"], input="pw-personal\npw-research\nn\n")
+    assert not legacy.exists()
 
 
 def _first_backend():

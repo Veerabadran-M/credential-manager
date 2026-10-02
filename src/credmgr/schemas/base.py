@@ -65,22 +65,23 @@ class ContentRequired(SchemaError):
         super().__init__("Content is required.")
 
 @dataclass
-class IndexEntry:
-    """One searchable row contributed by a schema to the cross-vault
-    metadata index (see credmgr/globalindex.py and the `global` CLI
-    command). An IndexEntry must never carry a secret value -- only
+class SearchEntry:
+    """One searchable row contributed by a schema to cross-vault ("global")
+    search (see credmgr/globalsearch.py and the `global` CLI command).
+    Built in memory from an already-unlocked document and discarded
+    right after matching -- nothing derived from it is ever written to
+    disk. A SearchEntry must never carry a secret value -- only
     identifiers.
 
     fields:  name -> value, matched case-insensitively/partially by
-             `global <query>` against every field of every entry in
-             every vault.
+             `global <query>` against every field of every entry.
     summary: ordered (label, value) pairs shown to the user once a
              search narrows down to this entry (e.g. [("Service",
              "github"), ("User ID", "alice")]).
     args:    the positional args that resolve this exact entry via this
-             schema's own `cmd_get(document, args, config)` once the
-             owning vault has been unlocked. This is what lets `global`
-             retrieve the secret without any schema-specific branching.
+             schema's own `cmd_get(document, args, config)`. This is
+             what lets `global` retrieve the secret without any
+             schema-specific branching.
     """
     fields: dict[str, str]
     summary: list[tuple[str, str]]
@@ -199,16 +200,52 @@ class Schema(ABC):
     def cmd_export(self, document, config) -> CommandResult:
         raise SchemaError(f"'export' is not supported by the '{self.name}' schema.")
 
-    def index_entries(self, document) -> list[IndexEntry]:
-        """Return one IndexEntry per searchable item in *this* document,
-        for the cross-vault metadata index that powers `credmgr global`
-        (see credmgr/globalindex.py). Called once per vault, right after
-        any command that mutates and saves it, and during index rebuilds
-        -- never on every search, which is the whole point of the index.
+    @classmethod
+    def supports_global_search(cls) -> bool:
+        """True if this schema overrides `search_entries()`. Lets the
+        `global` command skip (without unlocking) vaults whose schema
+        can't take part."""
+        return cls.search_entries is not Schema.search_entries
+
+    def search_entries(self, document) -> list[SearchEntry]:
+        """Return one SearchEntry per searchable item in *this* document,
+        for cross-vault `credmgr global` search (see
+        credmgr/globalsearch.py). Called in memory, on a document the
+        caller has already unlocked, once per `global` run -- results
+        are never persisted.
 
         Must return only identifiers (service names, userids, key
         names, ...) -- never passwords, values, or other secrets. The
         default raises SchemaError so a schema that doesn't implement
         this simply doesn't participate in `global` search (its vaults
         are skipped, not crashed on)."""
-        raise SchemaError(f"'global' indexing is not supported by the '{self.name}' schema.")
+        raise SchemaError(f"'global' search is not supported by the '{self.name}' schema.")
+
+    # ---- moving entries between vaults (`credmgr transfer`) ----
+
+    def transfer_select(self, document, args: list) -> list:
+        """Resolve `args` (same shape as this schema's `get`/`delete`
+        args; empty means "everything") to a list of opaque *items*
+        in `document`, without modifying it. Items must carry the
+        entry's full data (history, timestamps, ...) so nothing is lost
+        in transit. Raises SchemaError if nothing matches or the match
+        is ambiguous in a way the schema can't resolve."""
+        raise SchemaError(f"'transfer' is not supported by the '{self.name}' schema.")
+
+    def transfer_label(self, item) -> str:
+        """Human-readable, secret-free label for one item (used in
+        progress/summary output)."""
+        raise SchemaError(f"'transfer' is not supported by the '{self.name}' schema.")
+
+    def transfer_insert(self, document, items: list, overwrite: bool = False) -> tuple[list, list]:
+        """Add deep copies of `items` to `document`. Returns
+        (inserted, skipped): items that were written vs. items left
+        alone because an equivalent entry already exists (never
+        overwritten unless `overwrite` is True, in which case a
+        conflicting entry is replaced and counted as inserted)."""
+        raise SchemaError(f"'transfer' is not supported by the '{self.name}' schema.")
+
+    def transfer_remove(self, document, items: list) -> None:
+        """Remove `items` (as returned by `transfer_select` on this same
+        document) from `document`."""
+        raise SchemaError(f"'transfer' is not supported by the '{self.name}' schema.")

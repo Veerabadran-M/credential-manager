@@ -324,29 +324,29 @@ def test_cmd_audit_runs_without_error(schema, config):
     assert any("Password Audit" in line.text for line in result.lines)
 
 
-# ---- index_entries (credmgr global) ----
+# ---- search_entries (credmgr global) ----
 
-def test_index_entries_empty_document_returns_empty_list(schema):
-    assert schema.index_entries(Credentials()) == []
+def test_search_entries_empty_document_returns_empty_list(schema):
+    assert schema.search_entries(Credentials()) == []
 
 
-def test_index_entries_one_row_per_account(schema, config):
+def test_search_entries_one_row_per_account(schema, config):
     doc = Credentials()
     schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
     schema.cmd_add(doc, ["github", "bob"], GEN_OPTS, config)
     schema.cmd_add(doc, ["gitlab", "alice"], GEN_OPTS, config)
 
-    entries = schema.index_entries(doc)
+    entries = schema.search_entries(doc)
     assert len(entries) == 3
     fields = sorted((e.fields["service"], e.fields["userid"]) for e in entries)
     assert fields == [("github", "alice"), ("github", "bob"), ("gitlab", "alice")]
 
 
-def test_index_entries_args_resolve_via_cmd_get(schema, config):
+def test_search_entries_args_resolve_via_cmd_get(schema, config):
     doc = Credentials()
     schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
 
-    [entry] = schema.index_entries(doc)
+    [entry] = schema.search_entries(doc)
     assert entry.args == ["github", "alice"]
     assert entry.summary == [("Service", "github"), ("User ID", "alice")]
 
@@ -357,9 +357,29 @@ def test_index_entries_args_resolve_via_cmd_get(schema, config):
     assert any("alice" in row for row in result.table.rows)
 
 
-def test_index_entries_never_include_password_field_name(schema, config):
+def test_search_entries_never_include_password_field_name(schema, config):
     doc = Credentials()
     schema.cmd_add(doc, ["github", "alice"], GEN_OPTS, config)
-    [entry] = schema.index_entries(doc)
+    [entry] = schema.search_entries(doc)
     assert "password" not in entry.fields
     assert not any("password" in label.lower() for label, _ in entry.summary)
+
+
+# ---- -spl / special_chars on generated passwords ----
+
+def test_add_generate_with_special_chars_restricts_the_set(schema, config):
+    import string
+    doc = Credentials()
+    schema.cmd_add(doc, ["svc", "u"], {**GEN_OPTS, "length": 40, "special_chars": "@_"}, config)
+    pwd = doc.services["svc"][0].password
+    assert {c for c in pwd if c in string.punctuation} <= set("@_")
+
+
+def test_add_generate_with_invalid_special_chars_raises_schema_error(schema, config):
+    with pytest.raises(SchemaError):
+        schema.cmd_add(Credentials(), ["svc", "u"], {**GEN_OPTS, "special_chars": "abc"}, config)
+
+
+def test_add_generate_passphrase_with_special_chars_raises_schema_error(schema, config):
+    with pytest.raises(SchemaError):
+        schema.cmd_add(Credentials(), ["svc", "u"], {**GEN_OPTS, "passphrase": True, "special_chars": "!"}, config)

@@ -12,7 +12,7 @@ import difflib
 
 from ...clipboard import copy_to_clipboard
 from ...validation import validate_text
-from ..base import CommandResult, IndexEntry, Schema, SchemaError
+from ..base import CommandResult, SearchEntry, Schema, SchemaError
 
 MAX_KEY_LENGTH = 256
 MAX_VALUE_LENGTH = 8192
@@ -261,10 +261,45 @@ class EnvSchema(Schema):
     def cmd_export(self, document: EnvDocument, config) -> CommandResult:
         return CommandResult(raw=EnvSchema.serialize(document).decode("utf-8"))
 
-    # ---- global (cross-vault) search index ----
+    # ---- global (cross-vault) search ----
 
-    def index_entries(self, document: EnvDocument) -> list[IndexEntry]:
+    def search_entries(self, document: EnvDocument) -> list[SearchEntry]:
         return [
-            IndexEntry(fields={"key": key}, summary=[("Key", key)], args=[key])
+            SearchEntry(fields={"key": key}, summary=[("Key", key)], args=[key])
             for key, _value in document.entries
         ]
+
+    # ---- moving entries between vaults (`credmgr transfer`) ----
+    # An item is a (key, value) pair.
+
+    def transfer_select(self, document: EnvDocument, args) -> list:
+        if len(args) > 1:
+            raise SchemaError("Usage: <KEY>  (or nothing, with --all)")
+        if not document.entries:
+            raise SchemaError("No entries stored.")
+        if not args:
+            return list(document.entries)
+
+        matches = _match_keys(document, args[0])
+        if not matches:
+            raise SchemaError(f"Key '{args[0]}' not found.")
+        if len(matches) > 1:
+            raise SchemaError(f"Ambiguous key '{args[0]}'. Be more specific. Matches: {', '.join(matches)}")
+        return [(matches[0], document.get(matches[0]))]
+
+    def transfer_label(self, item) -> str:
+        return item[0]
+
+    def transfer_insert(self, document: EnvDocument, items, overwrite: bool = False):
+        inserted, skipped = [], []
+        for key, value in items:
+            if document.index_of(key) >= 0 and not overwrite:
+                skipped.append((key, value))
+                continue
+            document.set(key, value)
+            inserted.append((key, value))
+        return inserted, skipped
+
+    def transfer_remove(self, document: EnvDocument, items) -> None:
+        for key, _value in items:
+            document.delete(key)

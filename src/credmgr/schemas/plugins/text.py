@@ -8,7 +8,7 @@ block of freeform text, or anything else that doesn't naturally split
 into named fields.
 
 Because there are no identifiers to speak of, this schema does not
-implement `index_entries()` / `cmd_list_all()` / `cmd_history()` /
+implement `search_entries()` / `cmd_list_all()` / `cmd_history()` /
 `cmd_audit()` -- the defaults (raise SchemaError) are correct here: a
 `text` vault simply doesn't participate in `credmgr global` or
 `credmgr list-all`, and has no service/account concept to audit or

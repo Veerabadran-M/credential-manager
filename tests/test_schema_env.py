@@ -222,26 +222,26 @@ def test_cmd_export_serializes_document(schema, config):
     assert result.raw == "A=1\n"
 
 
-# ---- index_entries (credmgr global) ----
+# ---- search_entries (credmgr global) ----
 
-def test_index_entries_empty_document_returns_empty_list(schema):
-    assert schema.index_entries(EnvDocument()) == []
+def test_search_entries_empty_document_returns_empty_list(schema):
+    assert schema.search_entries(EnvDocument()) == []
 
 
-def test_index_entries_one_row_per_key(schema, config):
+def test_search_entries_one_row_per_key(schema, config):
     doc = EnvDocument()
     schema.cmd_add(doc, ["OPENAI_API_KEY", "sk-secret"], {}, config)
     schema.cmd_add(doc, ["DB_PASSWORD", "hunter2"], {}, config)
 
-    entries = schema.index_entries(doc)
+    entries = schema.search_entries(doc)
     assert sorted(e.fields["key"] for e in entries) == ["DB_PASSWORD", "OPENAI_API_KEY"]
 
 
-def test_index_entries_args_resolve_via_cmd_get(schema, config):
+def test_search_entries_args_resolve_via_cmd_get(schema, config):
     doc = EnvDocument()
     schema.cmd_add(doc, ["OPENAI_API_KEY", "sk-secret"], {}, config)
 
-    [entry] = schema.index_entries(doc)
+    [entry] = schema.search_entries(doc)
     assert entry.args == ["OPENAI_API_KEY"]
     assert entry.summary == [("Key", "OPENAI_API_KEY")]
 
@@ -249,9 +249,9 @@ def test_index_entries_args_resolve_via_cmd_get(schema, config):
     assert any("OPENAI_API_KEY" in line.text for line in result.lines)
 
 
-def test_index_entries_never_include_the_value(schema, config):
+def test_search_entries_never_include_the_value(schema, config):
     doc = EnvDocument()
     schema.cmd_add(doc, ["OPENAI_API_KEY", "sk-super-secret-value"], {}, config)
-    [entry] = schema.index_entries(doc)
+    [entry] = schema.search_entries(doc)
     assert "sk-super-secret-value" not in entry.fields.values()
     assert all("sk-super-secret-value" != value for _label, value in entry.summary)

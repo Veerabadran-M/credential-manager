@@ -80,18 +80,18 @@ for schema details.
 | `credmgr get <service> [userid]` | Display credentials in a table |
 | `credmgr search <query>` | Fuzzy search across entries |
 | `credmgr copy <service> [userid]` | Copy a value to the clipboard (auto-clears) |
-| `credmgr add <service> <userid> [--generate] [--passphrase] [--notes "..."]` | Add an entry |
+| `credmgr add <service> <userid> [--generate] [--passphrase] [-spl CHARS] [--notes "..."]` | Add an entry |
 | `credmgr update <service> <userid> userid <new_userid>` | Rename an account's userid *(credentials schema)* |
-| `credmgr update <service> <userid> password [--generate] [--passphrase]` | Change password, old one kept in history *(credentials schema)* |
+| `credmgr update <service> <userid> password [--generate] [--passphrase] [-spl CHARS]` | Change password, old one kept in history *(credentials schema)* |
 | `credmgr update <service> <userid> notes "<text>"` | Update notes *(credentials schema)* |
-| `credmgr update <service> <userid> account <new_userid> [--generate] [--passphrase]` | Replace both userid and password in one step, old password kept in history *(credentials schema)* |
+| `credmgr update <service> <userid> account <new_userid> [--generate] [--passphrase] [-spl CHARS]` | Replace both userid and password in one step, old password kept in history *(credentials schema)* |
 | `credmgr update <KEY> <VALUE>` | Update a value *(env schema)* |
 | `credmgr history <service> <userid>` | Show password history for an account *(credentials schema only)* |
 | `credmgr delete <service> [userid]` | Delete an account, or a whole service if no userid given |
 | `credmgr audit` | Run the password health audit *(credentials schema only)* |
 | `credmgr export` | Print the entire vault as plaintext (always re-prompts for the password) |
 | `credmgr import <filepath>` | Import entries from a file, skipping duplicates/invalid entries |
-| `credmgr generate [--passphrase] [--length N] [--words N]` | Generate a password/passphrase without storing it |
+| `credmgr generate [--passphrase] [--length N] [--words N] [-spl CHARS]` | Generate a password/passphrase without storing it |
 
 ### The `text` schema
 
@@ -126,8 +126,8 @@ defaults to `$VISUAL`, then `$EDITOR`, then a platform default
 editor <command>` (e.g. `vim`, `"code --wait"`).
 
 `list-all`, `history`, and `audit` aren't supported by `text`, and its
-vaults don't participate in `credmgr global` — there are no
-identifiers to index, only the content itself.
+vaults don't participate in `credmgr global` or `credmgr transfer` — there are
+no identifiers to search or select, only the content itself.
 
 Service/userid lookups (`get`, `copy`, `update`, `delete`, `history`) use
 progressively looser matching in the `credentials` schema: exact →
@@ -143,32 +143,77 @@ vault's listing.
 
 | Command | Description |
 |---|---|
-| `credmgr global <query>` | Search a metadata index across **every vault** for `query`, without switching or decrypting the active vault. Once you pick a result, it prompts for that one vault's password and displays the entry. |
+| `credmgr global <query>` | Search **every vault** for `query`. Each vault is unlocked in turn, searched in memory, and discarded unless it has a match. |
 
 ```bash
 credmgr global github
 credmgr global OPENAI_API_KEY
 ```
 
-Unlike every other entry command, `global` never touches the active
-vault. It searches `~/.credmgr/index.json` — a plaintext catalogue of
-searchable identifiers only (service names, userids, env keys — never
-passwords or keys) that every mutating command (`add`/`update`/`delete`/
-`import`/`vault create`/`vault delete`) keeps in sync automatically. If
-a vault's contents changed without the index knowing (a fresh install,
-a hand-edited `vault.json`, ...), `global` detects that from file
-metadata alone and transparently re-indexes just that vault (prompting
-for its password) before searching — no vault is ever decrypted just to
-search it.
+`global` never touches the active vault and **stores nothing**: there is
+no index, catalogue or cache of service names, userids or keys on disk
+(earlier versions kept a plaintext `~/.credmgr/index.json`; it is deleted
+automatically the next time you run `global` or save any vault). The
+trade-off is speed: every searched vault needs its master password (or a
+still-valid session key), and each password costs one Argon2 derivation,
+so a search takes roughly as long as unlocking all your vaults.
 
+- You are prompted for each vault's master password in turn (vault-name order). Enter nothing to skip that vault; a wrong password skips it with a warning instead of aborting the search.
+- `text` vaults can't be searched and are skipped without a prompt.
 - **No matches** → `No matching entries found.`
 - **One match** → shows vault/schema/summary and asks `View this secret? [Y/n]`.
 - **Multiple matches** → a numbered list (`vault  schema  <schema-specific summary>`) to pick from.
 
-Whichever way you get there, only the one vault behind your final
-selection is ever unlocked — see [plugin-system.md](plugin-system.md)
-for how a schema plugin contributes to and resolves entries in the
-index.
+Only vaults with at least one match stay unlocked in memory after the
+search, so showing the selected secret needs no second prompt. See
+[plugin-system.md](plugin-system.md) for how a schema plugin takes part.
+
+## Moving entries between vaults (`transfer`)
+
+| Command | Description |
+|---|---|
+| `credmgr transfer <src> <dst> <entry...>` | **Move** the selected entries from vault `src` to vault `dst` |
+| `credmgr transfer <src> <dst> --all` | Move every entry |
+| `... --copy` | Copy instead of move; the source is left untouched |
+| `... --overwrite` | Replace entries that already exist in the destination (default: skip them) |
+
+`<entry...>` is whatever that schema's `get`/`delete` take:
+`<service> [userid]` for `credentials` (a bare service moves all its
+accounts), `<KEY>` for `env`. Both vaults must use the **same schema**
+(`credmgr vault list` shows each) — otherwise the command stops before
+asking for any password. `text` vaults don't support `transfer`. The
+vaults may use different crypto backends and have different master
+passwords; you are prompted for both.
+
+```bash
+credmgr transfer personal work github alice
+credmgr transfer personal work github
+credmgr transfer old-env new-env --all --copy
+```
+
+Moved entries keep everything: password, notes, password history, and
+created/updated timestamps. Safety properties:
+
+- The destination is saved **first**; entries are removed from the source only afterwards, and only the ones actually written to the destination. A failure part-way can leave an entry in both vaults, never in neither.
+- Entries that already exist in the destination (same service+userid, or same key) are **skipped and left in the source**, and listed in the output. Re-run with `--overwrite` to replace them.
+- A wrong password for either vault aborts the command before anything is changed.
+
+## Generating passwords with a restricted special-character set (`-spl`)
+
+By default generated passwords draw their symbols from all printable ASCII
+punctuation. Some sites accept only a few, so:
+
+```bash
+credmgr generate --length 20 -spl '!@#_'
+credmgr add netflix alice --generate -spl '-_.'
+credmgr update github alice password --generate -spl '@'
+```
+
+- Passwords contain letters, digits and **only** the symbols you list, with at least one of each class (lowercase, uppercase, digit, and a symbol from your list).
+- `-spl ''` means no symbols at all (letters and digits only).
+- `CHARS` must be printable ASCII symbols (``!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~``); letters, digits, spaces and non-ASCII characters are rejected. Duplicates are ignored.
+- Quote the value in your shell, and use `-spl='-_'` if it starts with `-`.
+- Not valid together with `--passphrase`.
 
 ## Common flags
 
@@ -178,6 +223,7 @@ index.
 | `--passphrase` | `add`, `update`, `generate` | Generate a Diceware-style passphrase instead of a random password |
 | `--length N` | `add`, `update`, `generate` | Generated password length |
 | `--words N` | `add`, `update`, `generate` | Generated passphrase word count |
+| `-spl CHARS` (alias `--special-chars`) | `add`, `update`, `generate` | Restrict generated passwords' special characters to exactly `CHARS` (see below) |
 | `--notes "..."` / `-n` | `add` | Attach notes to a new entry |
 | `--backend NAME` | `init`, `vault create`, `migrate` | Choose a crypto backend non-interactively |
 | `--schema NAME` | `vault create` | Choose a schema for a new vault (default: `credentials`; also `env`, `text`) |

@@ -19,7 +19,7 @@ see [plugin-system.md](plugin-system.md).
    key/value pairs, or something else entirely) is decided by a `Schema`
    plugin, not hard-coded into the vault, application, or CLI layers.
 4. **Frontend/core separation.** All application logic — vault
-   management, authentication, CRUD dispatch, the search index — lives in
+   management, authentication, CRUD dispatch, cross-vault search/transfer — lives in
    an application layer (`credmgr/core/`) with a plain Python API that
    never touches a terminal. The bundled Typer CLI (`credmgr/cli/`) is
    just one caller of that API; a REPL, TUI, GUI, or REST frontend could
@@ -50,7 +50,7 @@ credential-manager/
         ├── datasources.py               # Downloads optional security datasets
         ├── search.py                     # Fuzzy + global search (credentials schema)
         ├── audit.py                       # Password health audit (credentials schema)
-        ├── globalindex.py                  # Cross-vault metadata search index (`credmgr global`)
+        ├── globalsearch.py                 # In-memory cross-vault search (`credmgr global`); nothing persisted
         ├── clipboard.py                    # Clipboard copy with auto-clear
         ├── validation.py                     # Shared text-input validation
         ├── core/                              # Application layer -- see "Frontend/core split" below
@@ -128,8 +128,7 @@ print or read from the terminal either — they return a `CommandResult`
 | `needs_confirmation` | `True` if a destructive write command (e.g. deleting every account under a service) stopped short of mutating and is waiting for the caller to retry with `confirmed=True`. |
 
 `CredentialManager` dispatches CRUD operations to the active vault's
-schema generically and persists the vault (and refreshes the search
-index) whenever `result.mutated` is `True`; `credmgr/cli/ui.py`'s
+schema generically and persists the vault whenever `result.mutated` is `True`; `credmgr/cli/ui.py`'s
 `render_result()` turns `lines`/`table` into actual terminal output.
 Nothing about this is schema-specific, which is what lets `cli/commands.py`
 stay generic across schemas.
@@ -149,7 +148,7 @@ stay generic across schemas.
 | `generator.py` | Cryptographically secure random password and Diceware-style passphrase generation. |
 | `search.py` | Exact → substring → fuzzy matching across services, userids, and notes, for the `credentials` schema. |
 | `audit.py` | Detects weak, duplicate, reused, stale, and breached passwords, for the `credentials` schema. |
-| `globalindex.py` | Owns `~/.credmgr/index.json`, the metadata-only search catalogue behind `credmgr global`: derives entries from an already-decrypted document (via a schema's `index_entries`), tracks per-vault staleness from file metadata, and answers cross-vault searches. Doesn't decrypt anything itself, though a stale entry means the caller (`CredentialManager.refresh_vault_index()`) must unlock that one vault to bring it back in sync before searching. |
+| `globalsearch.py` | Cross-vault search behind `credmgr global`. A `GlobalSearchSession` unlocks one vault at a time (via `CredentialManager.unlock`), builds that vault's searchable rows in memory from the decrypted document (a schema's `search_entries`), matches them, and keeps the unlocked vault only if it had a hit. Writes nothing to disk. Also contains `purge_legacy_index()`, which deletes the plaintext `index.json` older versions created. |
 | `clipboard.py` | Copies a value to the clipboard and clears it after a timeout, in a forked background process. Returns a `ClipboardResult` instead of printing. |
 | `validation.py` | Shared single-line/multiline text validation used by schema plugins. |
 | `crypto/` | The pluggable AEAD encryption backend system — see [crypto.md](crypto.md). |
@@ -195,7 +194,7 @@ graph TD
     Core --> VaultMgr[vaultmgr.py]
     Core --> Datasources[datasources.py]
     Core --> Generator[generator.py]
-    Core --> GlobalIndex[globalindex.py]
+    Core --> GlobalSearch[globalsearch.py]
     Auth --> Vault[vault.py]
     Vault --> CryptoRegistry[crypto/registry.py]
     Vault --> SchemaRegistry[schemas/registry.py]
@@ -210,8 +209,7 @@ graph TD
     Audit --> Datasources
     Vault --> Envelope[crypto/envelope.py]
     Envelope --> CryptoRegistry
-    GlobalIndex --> SchemaRegistry
-    GlobalIndex --> VaultMgr
+    GlobalSearch --> SchemaRegistry
 ```
 
 Arrows point from "depends on" to "depended upon." Note that
@@ -226,31 +224,39 @@ without touching anything below `credmgr/cli/`.
 
 ## Cross-vault search (`global`) data flow
 
-`credmgr global <query>` never decrypts every vault to search it — it
-searches `globalindex.py`'s on-disk catalogue of metadata, which every
-mutating command keeps current as a side effect of the flow above (once
-`vault.save()` succeeds, `CredentialManager._save()` hands the same
-in-memory document to `globalindex.update_vault()` — no extra unlock, no
-extra vault read):
+`credmgr global <query>` keeps **no index**. Every search decrypts each
+searchable vault, in memory, one at a time:
 
 ```mermaid
 flowchart LR
-    A[User types<br/>credmgr global QUERY] --> B["core/manager.py<br/>stale_index_vaults()"]
-    B -->|stale vaults, if any| C["core/manager.py<br/>refresh_vault_index(name)"]
-    C --> D["globalindex.py<br/>update_vault()"]
-    D --> E["core/manager.py<br/>index_search()"]
-    B -->|nothing stale| E
-    E --> F[User picks a match]
-    F --> G["core/manager.py<br/>get_from_vault(match.vault, match.args)"]
-    G --> H["schema plugin<br/>cmd_get(document, match.args, config)"]
-    H --> I[Secret displayed]
+    A[User types<br/>credmgr global QUERY] --> B["core/manager.py<br/>global_search_session(query)"]
+    B --> C["for each vault:<br/>session.search_vault(name)"]
+    C --> D["manager.unlock(remember=False)<br/>session key or master password"]
+    D --> E["schema plugin<br/>search_entries(document)"]
+    E --> F{match?}
+    F -->|no| G[document dropped]
+    F -->|yes| H[vault kept unlocked in memory]
+    H --> I[User picks a match]
+    I --> J["session.get(match)<br/>schema.cmd_get(document, match.args)"]
+    J --> K[Secret displayed]
 ```
 
-Only the vault behind the final selection (step G) is ever unlocked to
-retrieve a secret; any unlocks in step C are solely to bring a stale
-vault's metadata back in sync, and happen before the user has even seen
-a list of matches. The active vault named in `config.active_vault` is
-never read from or written to by any of this.
+Nothing derived from a vault's contents is written anywhere. Vaults with
+no hit are discarded straight after matching; vaults with a hit stay in
+memory only until the command ends. Unlocking for search deliberately
+does not create new session-cache entries (`remember=False`), though an
+existing, still-valid cached key is used. The active vault named in
+`config.active_vault` is never read from or written to by any of this.
+Schemas that can't be searched (`text`) are skipped without unlocking.
+
+## Moving entries between vaults (`transfer`) data flow
+
+`CredentialManager.transfer(src, dst, args, copy=, overwrite=)` requires
+both vaults to use the same schema, unlocks both, then calls the schema's
+`transfer_select` → `transfer_insert` (into the destination document) →
+`_save(dst)` → `transfer_remove` (from the source document) →
+`_save(src)`. The destination is persisted before the source is
+modified, so a crash can duplicate an entry but never lose it.
 
 ## Encryption workflow (summary)
 

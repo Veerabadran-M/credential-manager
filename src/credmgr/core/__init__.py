@@ -3,7 +3,7 @@
 CredentialManager (see manager.py) is the single entry point every
 frontend (currently just credmgr/cli/) should use. It knows how to
 create/open/manage vaults, dispatch CRUD to the active schema, keep the
-cross-vault search index in sync, and drive session-key caching -- all
+cross-vault search (in memory only), and drive session-key caching -- all
 the orchestration that used to live directly in the CLI's command
 functions.
 
@@ -26,12 +26,13 @@ from __future__ import annotations
 from ..crypto import BackendUnavailableError, UnknownBackendError
 from ..schemas import ContentRequired, SchemaError, SecretRequired, UnknownSchemaError
 from ..vault import AuthenticationError, VaultError
-from .manager import (CredentialManager, PasswordRequired, UnlockedVault,
-                       VaultNotFound)
+from .manager import (CredentialManager, PasswordRequired, TransferResult,
+                       UnlockedVault, VaultNotFound)
 
 __all__ = [
     "CredentialManager",
     "UnlockedVault",
+    "TransferResult",
     # Exceptions a frontend may want to catch. Re-exported here so a
     # frontend only needs to import from credmgr.core, never reaching
     # into credmgr.vault/credmgr.crypto/credmgr.schemas directly.

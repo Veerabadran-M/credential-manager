@@ -47,7 +47,8 @@ credmgr audit
 | **Encryption** | Pluggable backends — AES-256-GCM (`cryptography` or `pycryptodome`) and XChaCha20-Poly1305 (`PyNaCl`); keys derived via Argon2id |
 | **Content schemas** | Pluggable vault content — `credentials` (services/accounts/passwords/history), `env` (flat `KEY=VALUE` entries), or `text` (one encrypted text blob) |
 | **Multi-vault** | Create, list, switch between, and delete independently encrypted vaults |
-| **Cross-vault search** | `credmgr global <query>` searches a metadata-only index across every vault at once, without switching or decrypting the active one, then unlocks only the vault you pick |
+| **Cross-vault search** | `credmgr global <query>` unlocks each vault in turn, searches it in memory and discards it unless it has a hit. No search index or other plaintext identifiers are ever written to disk (slower with many vaults, by design) |
+| **Move entries between vaults** | `credmgr transfer <src> <dst> <entry>` moves or copies entries between vaults of the same schema, keeping history and timestamps |
 | **Search** | Exact, substring, and fuzzy matching |
 | **Generation** | Cryptographically secure random passwords or Diceware-style passphrases |
 | **Clipboard** | Copy with automatic timed clearing |
@@ -154,6 +155,16 @@ credmgr vault list
 ```bash
 credmgr config set password_length 24
 credmgr generate --passphrase --words 6
+credmgr generate --length 20 -spl '!@#_'   # only these special characters
+credmgr add netflix alice --generate -spl '-_.'
+```
+
+**Move entries between vaults** (same schema only):
+
+```bash
+credmgr transfer personal work github alice   # one account
+credmgr transfer personal work github         # every account under a service
+credmgr transfer personal work --all --copy   # copy everything, leave the source alone
 ```
 
 For the full command list, flags, and matching behavior, see the

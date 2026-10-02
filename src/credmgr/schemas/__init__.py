@@ -11,7 +11,7 @@ env (flat KEY=VALUE entries).
 
 from __future__ import annotations
 
-from .base import CommandResult, ContentRequired, IndexEntry, Line, Schema, SchemaError, SecretRequired, Table
+from .base import CommandResult, ContentRequired, SearchEntry, Line, Schema, SchemaError, SecretRequired, Table
 from .registry import all_schemas, get_schema, register
 from .registry import UnknownSchemaError
 
@@ -24,7 +24,7 @@ __all__ = [
     "CommandResult",
     "Line",
     "Table",
-    "IndexEntry",
+    "SearchEntry",
     "get_schema",
     "all_schemas",
     "register",
