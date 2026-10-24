@@ -1,37 +1,35 @@
 """Vault Format v1: envelope-encrypted vault storage.
 
-On-disk layout:
+On-disk layout::
 
-    {
-        "version": 1,
-        "schema": "credentials",
-        "kdf": {...},
-        "backend": "aesgcm-cryptography",
-        "algorithm": "AES-256-GCM",
-        "encrypted_key": {"ciphertext": "..."},
-        "vault": {"ciphertext": "..."}
-    }
+```
+{
+    "version": 1,
+    "schema": "credentials",
+    "kdf": {...},
+    "backend": "aesgcm-cryptography",
+    "algorithm": "AES-256-GCM",
+    "encrypted_key": {"ciphertext": "..."},
+    "vault": {"ciphertext": "..."}
+}
+```
 
-"backend" names the registered crypto plugin (credmgr/crypto/) that
-encrypted this vault; this module never imports a crypto library
-itself, looking the backend up by name through the registry.
-"encrypted_key" is the DEK, wrapped by a key derived (Argon2id) from the
-master password; "vault" is the active "schema"'s document (see
-credmgr/schemas/), serialized and encrypted under the DEK. This module
-knows nothing about that document's shape -- it only exchanges raw
-plaintext bytes with the schema registry -- which keeps the vault format
-independent of what's actually stored in it.
+`version` identifies the on-disk format. `backend` identifies the
+registered crypto plugin that encrypted the vault, while `algorithm`
+identifies the plugin's encryption algorithm.
 
-`version` identifies this on-disk layout (currently `CURRENT_VERSION`,
-Vault Format v1); a future format change would add version-migration
-machinery here. Changing which *backend* encrypts an existing vault is a
-separate, explicit operation (`migrate_backend()`), since it requires
-the master password to re-encrypt data, not just reshape metadata.
+The master password is used with Argon2id to derive a key that wraps the
+DEK stored in `encrypted_key`. The serialized vault document is
+encrypted with the DEK and stored in `vault`.
 
-Each vault is a self-contained directory under
-<master_dir>/vaults/<name>/; `Vault(config, name=...)` operates on one
-named vault. See vaultmgr.py for directory management and config.py for
-path resolution.
+Each vault is stored as a self-contained directory under
+`<master_dir>/vaults/<name>/`. `Vault(config, name=...)` operates on
+one named vault. See `vaultmgr.py` for directory management and
+`config.py` for path resolution.
+
+Vault format versioning is separate from crypto backend migration.
+Changing the backend is an explicit `migrate_backend()` operation
+that re-encrypts the vault using the master password.
 """
 
 from __future__ import annotations
@@ -40,7 +38,7 @@ import json
 import os
 import shutil
 
-from .crypto import BackendUnavailableError, get_backend
+from .crypto import BackendUnavailableError, CryptoError, get_backend
 from .crypto.envelope import (KDFParams, decrypt_blob, derive_kek,
                                 encrypt_blob, generate_dek, unwrap_dek, wrap_dek)
 from .schemas import get_schema
@@ -57,15 +55,13 @@ class AuthenticationError(VaultError):
 def _validate_version(raw: dict) -> dict:
     """Reject a vault written by a newer, incompatible format version.
 
-    There is currently only one on-disk format (Vault Format v1, see the
-    module docstring), so this is a sanity check rather than a migration
-    step; a future format change would add version-migration machinery
-    here instead of just checking the number.
+    There is currently only one on-disk format (Vault Format v1, see the module docstring), 
+    a future format change would add version-migration machinery here.
     """
     version = raw.get("version", CURRENT_VERSION)
     if version != CURRENT_VERSION:
         raise VaultError(
-            f"Vault version {version} is newer than the version this build of credmgr supports ({CURRENT_VERSION}). Please upgrade credmgr.")
+            f"Vault version {version} is different than the version this build of credmgr supports ({CURRENT_VERSION}). Please upgrade credmgr.")
 
     raw.setdefault("schema", DEFAULT_SCHEMA)
     return raw
@@ -73,10 +69,7 @@ def _validate_version(raw: dict) -> dict:
 class Vault:
     def __init__(self, config, name: str | None = None):
         self.config = config
-        # The vault this instance operates on. Defaults to the *active*
-        # vault, but any named vault can be targeted directly -- e.g. by
-        # the `vault create`/`vault delete` commands, which must be able
-        # to touch a vault before (or without ever) making it active.
+        # The vault this instance operates on. Defaults to the *active* vault, but any named vault can be targeted directly
         self.name = name or config.active_vault
         self._schema_name: str | None = None  # set by _read_raw()/create()
 
@@ -105,8 +98,8 @@ class Vault:
 
     @property
     def schema_name(self) -> str | None:
-        """The schema this vault was last read as (set after unlock/create/
-        save/etc.). None until this Vault has touched the file at least once."""
+        """The schema this vault was last read as. 
+        None until this Vault has touched the file at least once."""
         return self._schema_name
 
     def create(self, backend_name: str, master_password: str, schema_name: str = DEFAULT_SCHEMA) -> bytes:
@@ -255,7 +248,7 @@ class Vault:
     def _require_backend(self, backend_name: str):
         """Look up a backend, translating a missing dependency into the
         actionable message from the requirements doc rather than letting an
-        ImportError (or an opaque registry error) bubble up raw."""
+        ImportError (or an opaque registry error)."""
         try:
             return get_backend(backend_name)
         except BackendUnavailableError:

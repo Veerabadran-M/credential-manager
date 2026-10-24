@@ -1,9 +1,7 @@
 """Multi-vault directory management.
 
-Owns the filesystem layout of named vaults under
-<master_dir>/vaults/<name>/ (create/list/delete). Never touches
-encryption or vault contents -- see vault.py, instantiated per named
-vault via Vault(config, name=...).
+Manages the filesystem layout of named vaults under <master_dir>/vaults/<name>/ (list/delete). 
+Not related to encryption or vault contents -- see vault.py.
 """
 
 from __future__ import annotations
@@ -12,17 +10,14 @@ import json
 import re
 import shutil
 
-_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_NAME_CONVENTION_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 class VaultManagerError(Exception):
     pass
 
 def validate_vault_name(name: str) -> str:
-    if not name or not _NAME_RE.match(name):
-        raise VaultManagerError(
-            "Vault name must be 1-64 characters long and contain only "
-            "letters, digits, '-', and '_'."
-        )
+    if not name or not _NAME_CONVENTION_RE.match(name):
+        raise VaultManagerError("Vault name must be 1-64 characters long and contain only letters, digits, '-', and '_'")
     return name
 
 def vault_exists(config, name: str) -> bool:

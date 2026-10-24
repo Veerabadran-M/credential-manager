@@ -1,17 +1,18 @@
 """Shared text-input validation used across schema plugins.
 
-Kept separate from any one schema so new schemas (SSH config, notes,
-certificates, ...) get the same baseline validation for free.
+Kept separate from any one schema so new schemas get the same baseline validation for free.
 """
 
 from __future__ import annotations
 
-def validate_text(value: str, name: str, *, max_length: int, allow_chars: str | None = None) -> str:
-    """Validate a single-line text field. Raises ValueError with a
-    human-readable message on failure; returns `value` unchanged on success.
+def validate_text(value: str | None, name: str, *, max_length: int, reject_chars: str | None = None) -> str:
+    """Validate a single-line text field.
 
-    `allow_chars`, if given, is a string of extra characters to reject
-    (e.g. "=" for env keys, where it's the parser's delimiter).
+    Raises ValueError with a human-readable message on failure and returns
+    `value` unchanged on success.
+
+    `reject_chars`, if given, specifies additional characters that are not
+    allowed.
     """
     if value is None:
         raise ValueError(f"{name} is required.")
@@ -25,21 +26,25 @@ def validate_text(value: str, name: str, *, max_length: int, allow_chars: str | 
         raise ValueError(f"{name} must be {max_length} characters or fewer.")
     if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
         raise ValueError(f"{name} cannot contain control characters.")
-    if allow_chars:
-        for ch in allow_chars:
+    if reject_chars:
+        for ch in reject_chars:
             if ch in value:
                 raise ValueError(f"{name} cannot contain '{ch}'.")
     return value
 
-def validate_multiline_text(value: str, name: str, *, max_length: int) -> str:
-    """Like validate_text, but allows internal newlines/whitespace (e.g. a
-    stored value or notes field) -- only rejects other control characters
-    and disallows a leading/trailing-whitespace-only value.
+def validate_multiline_text(value: str | None, name: str, *, max_length: int) -> str:
+    """Validate a multiline text field.
+
+    Allows newlines, tabs, and surrounding whitespace. Raises ValueError
+    with a human-readable message on failure and returns `value` unchanged
+    on success.
     """
     if value is None:
         raise ValueError(f"{name} is required.")
     if not isinstance(value, str):
         raise ValueError(f"{name} must be text.")
+    if not value.strip():
+        raise ValueError(f"{name} cannot be empty.")
     if len(value) > max_length:
         raise ValueError(f"{name} must be {max_length} characters or fewer.")
     if any((ord(ch) < 32 and ch not in ("\n", "\t")) or ord(ch) == 127 for ch in value):

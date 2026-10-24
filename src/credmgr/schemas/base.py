@@ -201,6 +201,13 @@ class Schema(ABC):
         raise SchemaError(f"'export' is not supported by the '{self.name}' schema.")
 
     @classmethod
+    def supports_list_all(cls) -> bool:
+        """True if this schema overrides `cmd_list_all()`. Lets the
+        `list-all` command skip (without unlocking) vaults whose schema
+        can't take part."""
+        return cls.cmd_list_all is not Schema.cmd_list_all
+
+    @classmethod
     def supports_global_search(cls) -> bool:
         """True if this schema overrides `search_entries()`. Lets the
         `global` command skip (without unlocking) vaults whose schema

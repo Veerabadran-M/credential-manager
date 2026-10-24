@@ -51,7 +51,7 @@ class EnvDocument:
 
 def _validate_key(key: str) -> str:
     try:
-        return validate_text(key, "key", max_length=MAX_KEY_LENGTH, allow_chars="=")
+        return validate_text(key, "key", max_length=MAX_KEY_LENGTH, reject_chars="=")
     except ValueError as e:
         raise SchemaError(str(e)) from e
 

@@ -475,6 +475,36 @@ def list_cmd() -> None:
         fatal(_load_vault_not_found_message(config.active_vault))
     _render(_call(manager.list_entries, password=None))
 
+def _list_all_one_vault(name: str):
+    """List a single vault for `list-all`, prompting for its master
+    password if no session key covers it. A vault that can't be listed
+    (schema without list-all support, blank/wrong password, unreadable,
+    ...) is skipped with a note instead of aborting the whole run.
+    Returns the CommandResult, or None if the vault was skipped."""
+    try:
+        schema = get_schema(manager.peek_schema(name))
+        if not schema.supports_list_all():
+            console.print(f"  Skipped: the '{schema.name}' schema does not support list-all.", style="yellow", markup=False)
+            return None
+    except (VaultError, VaultNotFound, UnknownSchemaError) as e:
+        console.print(f"  Skipped vault '{name}': {e}", style="yellow", markup=False)
+        return None
+
+    password = None
+    while True:
+        try:
+            return manager.list_all_for_vault(name, password=password)
+        except PasswordRequired as e:
+            prompt = e.prompt.rstrip().rstrip(":") + " (blank to skip): "
+            password = safe_getpass(prompt)
+            if not password:
+                console.print(f"  Skipped vault '{name}'.", style="yellow", markup=False)
+                return None
+        except (AuthenticationError, SchemaError, VaultError, VaultNotFound, UnknownSchemaError,
+                BackendUnavailableError, UnknownBackendError) as e:
+            console.print(f"  Skipped vault '{name}': {e}", style="yellow", markup=False)
+            return None
+
 def cmd_list_all() -> None:
     """Walk every vault on disk (not just the active one), authenticating
     against each in turn, and print its schema-shaped listing: every
@@ -487,12 +517,16 @@ def cmd_list_all() -> None:
     for i, name in enumerate(names):
         if i:
             console.print()
-        schema_name = manager.peek_schema(name)
+        try:
+            schema_name = manager.peek_schema(name)
+        except (VaultError, VaultNotFound, UnknownSchemaError):
+            schema_name = "unknown"
         marker = "*" if name == config.active_vault else " "
         console.print(f"{marker} [bold cyan]{name}[/bold cyan] ({schema_name})")
 
-        result = _call(manager.list_all_for_vault, name, password=None)
-        _render(result)
+        result = _list_all_one_vault(name)
+        if result is not None:
+            _render(result)
 
 @app.command(name="list-all", help="List services/userids (credentials) or keys (env) across every vault, not just the active one")
 def list_all_cmd() -> None:

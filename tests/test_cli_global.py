@@ -251,3 +251,32 @@ def test_global_removes_legacy_plaintext_index(two_vaults):
 def _first_backend():
     from credmgr.crypto.registry import available_backends
     return sorted(available_backends())[0]
+
+
+# ---- list-all: unsupported schema skips only that vault ----
+
+def test_list_all_skips_vault_whose_schema_lacks_list_all(two_vaults, available_backend_name):
+    _seed_vault(two_vaults, "notes", available_backend_name, "text", "pw-notes", lambda doc: None)
+    # names are sorted: notes, personal, research -- notes must not prompt
+    result = runner.invoke(app, ["list-all"], input="pw-personal\npw-research\n")
+    assert result.exit_code == 0, result.output
+    assert "does not support list-all" in result.output
+    assert "github" in result.output
+    assert "OPENAI_API_KEY" in result.output
+
+
+def test_list_all_wrong_password_skips_that_vault_only(two_vaults):
+    result = runner.invoke(app, ["list-all"], input="pw-personal\nwrong\n")
+    assert result.exit_code == 0, result.output
+    assert "Skipped vault 'research'" in result.output
+    assert "github" in result.output
+
+
+# ---- global: master password seeds the session cache ----
+
+def test_global_caches_session_key_after_password_unlock(two_vaults, monkeypatch):
+    cached = []
+    monkeypatch.setattr(auth_mod, "cache_session",
+                        lambda dek, config=None, vault_name=None: cached.append(vault_name))
+    runner.invoke(app, ["global", "OPEN"], input="pw-personal\npw-research\nn\n")
+    assert sorted(cached) == ["personal", "research"]

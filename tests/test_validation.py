@@ -53,13 +53,13 @@ def test_validate_text_rejects_del_character():
         validate_text("hel\x7flo", "field", max_length=10)
 
 
-def test_validate_text_allow_chars_rejects_disallowed_char():
+def test_validate_text_reject_chars_rejects_disallowed_char():
     with pytest.raises(ValueError, match="cannot contain '='"):
-        validate_text("KEY=VALUE", "key", max_length=20, allow_chars="=")
+        validate_text("KEY=VALUE", "key", max_length=20, reject_chars="=")
 
 
-def test_validate_text_allow_chars_accepts_when_absent():
-    assert validate_text("KEYVALUE", "key", max_length=20, allow_chars="=") == "KEYVALUE"
+def test_validate_text_reject_chars_accepts_when_absent():
+    assert validate_text("KEYVALUE", "key", max_length=20, reject_chars="=") == "KEYVALUE"
 
 
 # ---- validate_multiline_text ----

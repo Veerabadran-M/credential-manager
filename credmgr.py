@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Entry point wrapper so the tool can be run as `./credmgr.py` or
-`python credmgr.py`, without installing the package."""
+"""
+Entry point for the CLI tool.
+To run as `./credmgr.py` or `python credmgr.py` without installing the package.
+"""
 
 import sys
 from pathlib import Path

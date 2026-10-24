@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "credmgr"
-version = "4.4.0"
-description = "A local-first CLI password manager with pluggable cryptographic backends and envelope-encrypted storage"
+version = "4.4.1"
+description = "A local CLI password manager with pluggable cryptographic backends, schemas and envelope-encrypted storage"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"

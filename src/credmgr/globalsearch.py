@@ -3,13 +3,13 @@
 Nothing is stored. There is no search index, catalogue, or cache of
 identifiers on disk: each search unlocks every searchable vault (using
 a still-valid session key if one exists, otherwise the vault's master
-password), builds its searchable rows in memory from the decrypted
+password, which then seeds the normal short-lived session cache so later
+commands within `auth_timeout` don't ask again), builds its searchable rows in memory from the decrypted
 document (see `Schema.search_entries`), matches them against the
 query, and drops everything that didn't match. Only the vaults that
 produced at least one hit stay unlocked in memory, until the user picks
 a result (or the session object is closed), so retrieving the chosen
-secret needs no second password prompt and no new on-disk session
-cache. Trading speed for it: cost grows with the number of vaults
+secret needs no second password prompt. Trading speed for it: cost grows with the number of vaults
 (each needs its own Argon2 derivation unless a session key is cached).
 
 This module is core application code: it never prompts or prints.
@@ -57,7 +57,7 @@ class GlobalSearchSession:
             return []
 
         unlocked = self.manager.unlock(
-            vault_name=vault_name, password=password, remember=False,
+            vault_name=vault_name, password=password,
             prompt=f"Master password for vault '{vault_name}': ",
         )
         matches = match_document(vault_name, schema_name, unlocked.schema, unlocked.document, self.query)

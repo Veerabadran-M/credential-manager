@@ -1,8 +1,7 @@
-"""Fallback word list for passphrase generation.
+"""Word list for passphrase generation.
 
-`credmgr init` downloads a larger, real-world word list to
-<master_dir>/data/wordlist.txt (see datasources.py). WORD_LIST here is
-only the offline fallback used when that file is missing or unreadable.
+`credmgr init` downloads a larger word list to <master_dir>/data/wordlist.txt (see datasources.py). 
+WORD_LIST here is only the offline fallback used when that file is missing.
 """
 
 from __future__ import annotations
@@ -41,7 +40,7 @@ WORD_LIST = [
 
 def load_word_list(config) -> list:
     """Returns the fetched word list from `config.wordlist_file` if present
-    and non-empty, otherwise the small bundled WORD_LIST fallback."""
+    and non-empty, otherwise the WORD_LIST fallback."""
     try:
         words = [w.strip() for w in config.wordlist_file.read_text(encoding="utf-8").splitlines() if w.strip()]
         if words:
